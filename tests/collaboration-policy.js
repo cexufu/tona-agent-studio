@@ -13,6 +13,17 @@ async function request(url, options = {}) {
   if (!response.ok) throw new Error(response.status + ': ' + JSON.stringify(body));
   return body;
 }
+async function readJsonEventually(filePath) {
+  let lastError;
+  for (let index = 0; index < 30; index += 1) {
+    try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  throw lastError;
+}
+
 async function ready() {
   for (let i = 0; i < 30; i += 1) {
     try { return await request('/api/state'); } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
@@ -49,7 +60,7 @@ async function ready() {
       event: { sender: { sender_type: 'user', sender_id: { open_id: 'ou_test_one' } }, message: { message_id: 'message_background_knowledge', chat_id: 'chat_dynamic_plan', chat_type: 'group', message_type: 'text', content: JSON.stringify({ text: 'Background decision: use the existing API contract.' }) } }
     }) });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    let memoryStored = JSON.parse(fs.readFileSync(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'), 'utf8'));
+    let memoryStored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
     if (!(memoryStored.settings.groupKnowledge || []).some((item) => item.messageId === 'message_background_knowledge')) throw new Error('Unmentioned group message was not stored as group knowledge');
     if ((memoryStored.settings.collaborationTasks || []).length) throw new Error('Unmentioned group message should not start a task or reply');
     const taskText = "@_user_1 \u534f\u4f5c\u4efb\u52a1\uff1a\u534f\u8c03\uff1a" + selectedAgents[0].name + "\uff1b\u53c2\u4e0e\uff1a" + selectedAgents.map((agent) => agent.name).join("\u3001") + "\uff1b\u6267\u7b14\uff1a" + selectedAgents[2].name + "\uff1b\u8f6e\u6b21\uff1a10\uff1b\u4efb\u52a1\uff1a\u6d4b\u8bd5\u4e34\u65f6\u7f16\u7ec4";
@@ -58,14 +69,14 @@ async function ready() {
       event: { sender: { sender_type: 'user', sender_id: { open_id: 'ou_test_one' } }, message: { message_id: 'message_wrong_mention', chat_id: 'chat_dynamic_plan', chat_type: 'group', message_type: 'text', mentions: [{ key: '@_user_1', name: 'Feishu display name', id: { open_id: 'ou_test_coordinator' } }], content: JSON.stringify({ text: taskText }) } }
     }) });
     await new Promise((resolve) => setTimeout(resolve, 80));
-    let stored = JSON.parse(fs.readFileSync(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'), 'utf8'));
+    let stored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
     if ((stored.settings.collaborationTasks || []).some((item) => item.sourceMessageId === 'message_wrong_mention')) throw new Error('Unmentioned bot started a group task');
     await request('/feishu/events/usr_owner', { method: 'POST', body: JSON.stringify({
       header: { event_type: 'im.message.receive_v1', app_id: 'cli_test_coordinator' },
       event: { sender: { sender_type: 'user', sender_id: { open_id: 'ou_test_one' } }, message: { message_id: 'message_dynamic_plan', chat_id: 'chat_dynamic_plan', chat_type: 'group', message_type: 'text', mentions: [{ key: '@_user_1', name: 'Feishu display name', id: { open_id: 'ou_test_coordinator' } }], content: JSON.stringify({ text: taskText }) } }
     }) });
     await new Promise((resolve) => setTimeout(resolve, 120));
-    stored = JSON.parse(fs.readFileSync(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'), 'utf8'));
+    stored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
     const task = (stored.settings.collaborationTasks || []).find((item) => item.sourceMessageId === 'message_dynamic_plan');
     if (!task) throw new Error('Feishu task directive did not create a collaboration task');
     if (task.coordinatorAgentId !== selectedIds[0] || task.writerAgentId !== selectedIds[2]) throw new Error('Coordinator or writer was not parsed from Feishu task directive');
@@ -77,7 +88,7 @@ async function ready() {
       event: { sender: { sender_type: 'user', sender_id: { open_id: 'ou_test_one' } }, message: { message_id: 'message_open_discussion', chat_id: 'chat_dynamic_plan', chat_type: 'group', message_type: 'text', mentions: [{ key: '@_user_1', name: 'Feishu display name', id: { open_id: 'ou_test_coordinator' } }], content: JSON.stringify({ text: openDiscussionText }) } }
     }) });
     await new Promise((resolve) => setTimeout(resolve, 80));
-    stored = JSON.parse(fs.readFileSync(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'), 'utf8'));
+    stored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
     const openTask = (stored.settings.collaborationTasks || []).find((item) => item.sourceMessageId === 'message_open_discussion');
     if (!openTask || openTask.rounds !== 3 || openTask.sequence.length !== 10 || openTask.sequence.at(-1) !== selectedIds[2]) throw new Error('An unspecified round count did not create the balanced open discussion');
     if (!openTask.sequence.slice(0, -1).includes(selectedIds[2])) throw new Error('The final writer was excluded from the open discussion');
@@ -87,7 +98,7 @@ async function ready() {
       event: { sender: { sender_type: 'user', sender_id: { open_id: 'ou_test_one' } }, message: { message_id: 'message_named_colleagues', chat_id: 'chat_dynamic_plan', chat_type: 'group', message_type: 'text', mentions: [{ key: '@_user_1', name: 'Feishu display name', id: { open_id: 'ou_test_coordinator' } }], content: JSON.stringify({ text: naturalRequestText }) } }
     }) });
     await new Promise((resolve) => setTimeout(resolve, 80));
-    stored = JSON.parse(fs.readFileSync(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'), 'utf8'));
+    stored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
     if (!(stored.settings.collaborationTasks || []).some((item) => item.sourceMessageId === 'message_named_colleagues')) throw new Error('Named colleague request did not start a controlled collaboration');
     console.log('Collaboration policy test passed: five-role cap, ten-message cap, private task ledger, natural named-colleague requests, Feishu task directives, open discussion defaults, exact open-id mention routing, and silent group knowledge capture');
   } finally {

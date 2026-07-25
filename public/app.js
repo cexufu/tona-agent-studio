@@ -637,30 +637,34 @@ async function testProvider() {
   }
 }
 
+
 async function runCollaborationPilot() {
   const button = document.querySelector("#runCollaborationPilotButton");
   const box = document.querySelector("#pilotResult");
   if (!button) return;
   button.disabled = true;
-  button.textContent = "实验运行中...";
-  if (box) box.textContent = "正在用当前账号已启用的模型运行两类任务对照，请勿关闭页面。";
+  button.textContent = "\u5b9e\u9a8c\u8fd0\u884c\u4e2d...";
+  if (box) box.textContent = "\u6b63\u5728\u4f7f\u7528\u5f53\u524d\u8d26\u53f7\u5df2\u542f\u7528\u7684\u6a21\u578b\u8fd0\u884c\u4e24\u7c7b\u4efb\u52a1\u5bf9\u7167\uff0c\u8bf7\u52ff\u5173\u95ed\u9875\u9762\u3002";
   try {
     const result = await api("/api/collaboration-pilot", { method: "POST", body: JSON.stringify({}) });
     const lines = (result.experiments || []).map((item) => {
       const score = item.evaluation || {};
-      return item.task.title + "：单智能体 " + (score.single?.overall || "-") + "/5；固定协作 " + (score.fixed?.overall || "-") + "/5；动态协作 " + (score.dynamic?.overall || "-") + "/5。";
+      return item.task.title + "\uff1a\u5355\u667a\u80fd\u4f53 " + (score.single?.overall || "-") + "/5\uff1b\u56fa\u5b9a\u534f\u4f5c " + (score.fixed?.overall || "-") + "/5\uff1b\u81ea\u9002\u5e94\u534f\u4f5c " + (score.adaptive?.overall || "-") + "/5\u3002";
     });
-    if (box) box.textContent = "已完成：" + (result.model?.provider || "") + " / " + (result.model?.defaultModel || "") + "。未向飞书发送消息。\n" + lines.join("\n");
+    if (box) box.textContent = "\u5df2\u5b8c\u6210\uff1a" + (result.model?.provider || "") + " / " + (result.model?.defaultModel || "") + "\u3002\u672a\u5411\u98de\u4e66\u53d1\u9001\u6d88\u606f\u3002\n" + lines.join("\n");
     await loadRuns();
-    toast("协作实验完成，未向飞书发送任何消息");
+    state.modelUsage = await api("/api/model-usage");
+    renderModelUsage();
+    toast("\u534f\u4f5c\u5b9e\u9a8c\u5b8c\u6210\uff0c\u672a\u5411\u98de\u4e66\u53d1\u9001\u4efb\u4f55\u6d88\u606f");
   } catch (error) {
-    if (box) box.textContent = "实验未完成：" + error.message;
+    if (box) box.textContent = "\u5b9e\u9a8c\u672a\u5b8c\u6210\uff1a" + error.message;
     toast(error.message);
   } finally {
     button.disabled = false;
-    button.textContent = "运行协作实验";
+    button.textContent = "\u8fd0\u884c\u534f\u4f5c\u5b9e\u9a8c";
   }
 }
+
 async function loadRuns() {
   const runs = await api("/api/runs");
   $("#runList").innerHTML = runs.length ? runs.map((run) => `

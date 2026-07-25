@@ -42,6 +42,13 @@ async function waitUntilReady() {
     const usage = (await request("/api/model-usage")).body;
     if (usage.requests !== 1 || Math.abs(usage.costs.USD - 0.004) > 1e-9) throw new Error("Model cost calculation failed");
 
+    const pilot = await request("/api/collaboration-pilot", { method: "POST", body: JSON.stringify({}) });
+    if (pilot.status !== 200 || pilot.body.experiments?.length !== 2) throw new Error("Collaboration pilot failed");
+    if (pilot.body.experimentDesign?.preflight !== true || pilot.body.experimentDesign?.maxOnePilotPerWorkspace !== true) throw new Error("Collaboration pilot safeguards missing");
+    if (!pilot.body.experiments.every((item) => item.protocols?.adaptive?.selectedAgent)) throw new Error("Adaptive specialist selection was not recorded");
+    const usageAfterPilot = (await request("/api/model-usage")).body;
+    if (usageAfterPilot.requests <= usage.requests) throw new Error("Pilot model usage was not recorded");
+
     const blocked = await request("/api/agents/temporary_agent", { method: "DELETE" });
     if (blocked.status !== 409 || !blocked.body.dependencies.skills.includes("Test Skill")) throw new Error("Referenced agent deletion was not blocked");
     await request("/api/skills", { method: "POST", body: JSON.stringify({ id: "test_skill", name: "Test Skill", description: "test", enabled: true, steps: [{ agentId: "daily_assistant", task: "complete" }] }) });
