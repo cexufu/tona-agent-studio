@@ -1577,16 +1577,57 @@ async function feishuApi(settings, endpoint, options = {}) {
   if (!response.ok || (payload.code !== undefined && payload.code !== 0)) throw new Error(payload.msg || payload.message || "Feishu API request failed: " + response.status);
   return payload.data || payload;
 }
-function feishuTextChildren(content) {
-  return String(content || "").replace(/\r/g, "").split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 48).map((line) => ({ block_type: 2, text: { elements: [{ text_run: { content: line.slice(0, 1800) } }] } }));
+function feishuInlineElements(value) {
+  const source = String(value || ''); const elements = [];
+  const expression = /(\*\*[^*]+\*\*|\x60[^\x60]+\x60|\[[^\]]+\]\([^\s)]+\))/g; let offset = 0;
+  for (const match of source.matchAll(expression)) {
+    if (match.index > offset) elements.push({ text_run: { content: source.slice(offset, match.index) } });
+    const token = match[0];
+    if (token.startsWith('**')) elements.push({ text_run: { content: token.slice(2, -2), text_element_style: { bold: true } } });
+    else if (token.startsWith('\x60')) elements.push({ text_run: { content: token.slice(1, -1), text_element_style: { inline_code: true } } });
+    else { const link = token.match(/^\[([^\]]+)\]\(([^\s)]+)\)$/); elements.push({ text_run: { content: link[1], text_element_style: { link: { url: link[2] } } } }); }
+    offset = match.index + token.length;
+  }
+  if (offset < source.length) elements.push({ text_run: { content: source.slice(offset) } });
+  return elements.length ? elements : [{ text_run: { content: ' ' } }];
+}
+function feishuTextBlock(blockType, field, content, extra = {}) { return { block_type: blockType, [field]: { ...extra, elements: feishuInlineElements(content) } }; }
+function parseMarkdownTableRow(line) { return String(line || '').trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim().replace(/\\\|/g, '|')); }
+function isMarkdownTableDivider(line) { const cells = parseMarkdownTableRow(line); return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell)); }
+function normalizeMarkdownTable(rows) { const width = Math.min(9, Math.max(1, ...rows.map((row) => row.length))); return rows.slice(0, 9).map((row) => Array.from({ length: width }, (_, index) => String(row[index] || '').slice(0, 1200))); }
+function feishuDocumentPlan(content) {
+  const lines = String(content || '').replace(/\r/g, '').split('\n'); const plan = []; let codeLines = null; let codeLanguage = 'plaintext';
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index]; const line = raw.trim(); const fence = line.match(/^\x60\x60\x60([A-Za-z0-9_+-]*)\s*$/);
+    if (fence) { if (codeLines !== null) { plan.push({ kind: 'blocks', blocks: [feishuTextBlock(14, 'code', codeLines.join('\n'), { language: codeLanguage })] }); codeLines = null; } else { codeLanguage = fence[1] || 'plaintext'; codeLines = []; } continue; }
+    if (codeLines !== null) { codeLines.push(raw); continue; }
+    if (!line) continue;
+    if (/^\|.*\|$/.test(line) && index + 1 < lines.length && isMarkdownTableDivider(lines[index + 1])) { const rows = [parseMarkdownTableRow(line)]; index += 2; while (index < lines.length && /^\|.*\|$/.test(lines[index].trim())) { rows.push(parseMarkdownTableRow(lines[index])); index += 1; } index -= 1; plan.push({ kind: 'table', rows: normalizeMarkdownTable(rows) }); continue; }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) { const level = heading[1].length; plan.push({ kind: 'blocks', blocks: [feishuTextBlock(2 + level, 'heading' + level, heading[2])] }); continue; }
+    if (/^(---|\*\*\*|___)$/.test(line)) { plan.push({ kind: 'blocks', blocks: [{ block_type: 22, divider: {} }] }); continue; }
+    const todo = line.match(/^-\s+\[([ xX])\]\s+(.+)$/); if (todo) { plan.push({ kind: 'blocks', blocks: [feishuTextBlock(17, 'todo', todo[2], { style: { done: /x/i.test(todo[1]) } })] }); continue; }
+    const bullet = line.match(/^[-*+]\s+(.+)$/); if (bullet) { plan.push({ kind: 'blocks', blocks: [feishuTextBlock(12, 'bullet', bullet[1])] }); continue; }
+    const ordered = line.match(/^\d+[.)]\s+(.+)$/); if (ordered) { plan.push({ kind: 'blocks', blocks: [feishuTextBlock(13, 'ordered', ordered[1])] }); continue; }
+    const quote = line.match(/^>\s?(.*)$/); if (quote) { plan.push({ kind: 'blocks', blocks: [feishuTextBlock(15, 'quote', quote[1])] }); continue; }
+    plan.push({ kind: 'blocks', blocks: [feishuTextBlock(2, 'text', line)] });
+  }
+  if (codeLines !== null) plan.push({ kind: 'blocks', blocks: [feishuTextBlock(14, 'code', codeLines.join('\n'), { language: codeLanguage })] }); return plan;
+}
+async function appendFeishuBlocks(settings, documentId, parentBlockId, blocks) { if (!blocks.length) return []; const data = await feishuApi(settings, '/docx/v1/documents/' + encodeURIComponent(documentId) + '/blocks/' + encodeURIComponent(parentBlockId) + '/children', { method: 'POST', body: { children: blocks, index: -1 } }); return data.children || []; }
+async function createFeishuTable(settings, documentId, parentBlockId, rows) {
+  const safeRows = normalizeMarkdownTable(rows); if (!safeRows.length) return; const columnSize = safeRows[0].length; const rowSize = safeRows.length;
+  const created = await appendFeishuBlocks(settings, documentId, parentBlockId, [{ block_type: 31, table: { property: { row_size: rowSize, column_size: columnSize, column_width: Array.from({ length: columnSize }, () => Math.max(120, Math.floor(720 / columnSize))), header_row: true } } }]);
+  const tableId = created[0]?.block_id || created[0]?.blockId; if (!tableId) throw new Error('Feishu did not return a table block ID.');
+  const tableData = await feishuApi(settings, '/docx/v1/documents/' + encodeURIComponent(documentId) + '/blocks/' + encodeURIComponent(tableId)); const cellIds = tableData.block?.table?.cells || tableData.table?.cells || [];
+  if (cellIds.length < rowSize * columnSize) throw new Error('Feishu table cells were not initialized.');
+  for (let index = 0; index < rowSize * columnSize; index += 1) { const cellId = cellIds[index]; const childData = await feishuApi(settings, '/docx/v1/documents/' + encodeURIComponent(documentId) + '/blocks/' + encodeURIComponent(cellId) + '/children?page_size=1'); const textBlock = (childData.items || childData.children || [])[0]; const textBlockId = textBlock?.block_id || textBlock?.blockId; const cellText = safeRows[Math.floor(index / columnSize)][index % columnSize]; if (textBlockId) await feishuApi(settings, '/docx/v1/documents/' + encodeURIComponent(documentId) + '/blocks/' + encodeURIComponent(textBlockId), { method: 'PATCH', body: { update_text_elements: { elements: feishuInlineElements(cellText) } } }); else await appendFeishuBlocks(settings, documentId, cellId, [feishuTextBlock(2, 'text', cellText)]); }
 }
 async function createFeishuDocument(settings, title, content) {
-  const created = await feishuApi(settings, "/docx/v1/documents", { method: "POST", body: { title: String(title || "TONA \u6587\u6863").slice(0, 100) } });
-  const documentId = created.document?.document_id || created.document_id;
-  if (!documentId) throw new Error("Feishu did not return a document ID.");
-  const children = feishuTextChildren(content);
-  if (children.length) await feishuApi(settings, "/docx/v1/documents/" + encodeURIComponent(documentId) + "/blocks/" + encodeURIComponent(documentId) + "/children", { method: "POST", body: { children, index: 0 } });
-  return { documentId, documentUrl: "https://feishu.cn/docx/" + documentId };
+  const created = await feishuApi(settings, '/docx/v1/documents', { method: 'POST', body: { title: String(title || 'TONA Document').slice(0, 100) } }); const documentId = created.document?.document_id || created.document_id;
+  if (!documentId) throw new Error('Feishu did not return a document ID.');
+  for (const item of feishuDocumentPlan(content)) { if (item.kind === 'table') await createFeishuTable(settings, documentId, documentId, item.rows); else await appendFeishuBlocks(settings, documentId, documentId, item.blocks); }
+  return { documentId, documentUrl: 'https://feishu.cn/docx/' + documentId };
 }
 function textFromFeishuBlock(block) { return (block?.text?.elements || []).map((element) => element.text_run?.content || element.mention_user?.user_id || element.equation?.content || "").join("").trim(); }
 async function readFeishuDocument(settings, documentId) {
@@ -1603,7 +1644,7 @@ function scheduleDocumentDelivery(workspaceId, requestId) {
     if (!bot) { request.status = "failed"; request.error = "The linked Feishu bot is no longer configured."; request.updatedAt = new Date().toISOString(); writeDb(db); return; }
     try {
       request.status = "generating"; request.updatedAt = new Date().toISOString(); writeDb(db);
-      const content = await runAgentReply(db, request.agentId || "daily_assistant", "Create a polished Chinese Feishu document for the following task. Use clear sections, concise paragraphs, concrete next steps, and state uncertainty where evidence is missing. Do not claim external access.\n\nTask:\n" + request.task);
+      const content = await runAgentReply(db, request.agentId || "daily_assistant", "Create a polished Chinese Feishu document for the following task. Output Feishu-compatible Markdown only: use # through ### for a clear hierarchy, short paragraphs, bullets for actions, Markdown tables when comparing fields or schedules, and a concise arrow-based flow section when the task has a process. Avoid decorative separators, do not invent citations or external access, and state uncertainty where evidence is missing.\n\nTask:\n" + request.task);
       const document = await createFeishuDocument(larkBotToAppSettings(bot), request.title, content);
       request.status = "completed"; request.documentId = document.documentId; request.documentUrl = document.documentUrl; request.completedAt = new Date().toISOString(); request.updatedAt = request.completedAt; writeDb(db);
       await sendFeishuMessageToChat(larkBotToAppSettings(bot), request.requestedInChatId, "interactive", documentDeliveryResultCard(request));
