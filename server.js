@@ -1550,7 +1550,7 @@ function wantsFeishuDocumentRead(text) {
 }
 function createDocumentDeliveryRequest(db, message, bot) {
   const task = documentDeliveryTask(message.text);
-  const request = { id: "doc_" + crypto.randomUUID().slice(0, 12), status: "pending", task, title: task.slice(0, 60), requestedBy: message.senderId || "", requestedInChatId: message.chatId || "", requestedMessageId: message.messageId || "", botId: bot?.id || "", agentId: bot?.agentId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const request = { id: "doc_" + crypto.randomUUID().slice(0, 12), status: "pending", task, title: task.slice(0, 60), requestedBy: message.senderId || "", requestedInChatId: message.chatId || "", requestedMessageId: message.messageId || "", botId: bot?.id || "", botAppId: bot?.appId || "", agentId: bot?.agentId || "", workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   const requests = documentRequestEntries(db); requests.push(request); db.settings.documentRequests = requests.slice(-300); writeDb(db); return request;
 }
 function documentDeliveryCard(request) {
@@ -1558,8 +1558,8 @@ function documentDeliveryCard(request) {
     { tag: "div", text: { tag: "lark_md", content: "**\u62df\u4ea4\u4ed8\u5185\u5bb9\uff1a** " + request.task + "\n\n\u786e\u8ba4\u540e\uff0cTONA \u5c06\u4f7f\u7528\u5f53\u524d\u89d2\u8272\u751f\u6210\u5185\u5bb9\u3001\u521b\u5efa\u4e00\u4efd\u65b0\u7684\u98de\u4e66\u6587\u6863\uff0c\u5e76\u628a\u94fe\u63a5\u56de\u4f20\u5230\u5f53\u524d\u4f1a\u8bdd\u3002" } },
     { tag: "note", elements: [{ tag: "plain_text", content: "\u53ea\u4f1a\u65b0\u5efa\u6587\u6863\uff0c\u4e0d\u4f1a\u8986\u76d6\u5df2\u6709\u6587\u6863\u3002\u9700\u8981\u5728\u98de\u4e66\u5f00\u653e\u5e73\u53f0\u4e3a\u8be5\u5e94\u7528\u5f00\u901a\u6587\u6863\u8bfb\u5199\u6743\u9650\u3002" }] },
     { tag: "action", actions: [
-      { tag: "button", text: { tag: "plain_text", content: "\u786e\u8ba4\u521b\u5efa\u6587\u6863" }, type: "primary", value: { source: "tona_document_delivery", requestId: request.id, action: "approve" } },
-      { tag: "button", text: { tag: "plain_text", content: "\u53d6\u6d88" }, type: "default", value: { source: "tona_document_delivery", requestId: request.id, action: "reject" } }
+      { tag: "button", text: { tag: "plain_text", content: "\u786e\u8ba4\u521b\u5efa\u6587\u6863" }, type: "primary", value: { source: "tona_document_delivery", requestId: request.id, workspaceId: request.workspaceId, botAppId: request.botAppId, action: "approve" } },
+      { tag: "button", text: { tag: "plain_text", content: "\u53d6\u6d88" }, type: "default", value: { source: "tona_document_delivery", requestId: request.id, workspaceId: request.workspaceId, botAppId: request.botAppId, action: "reject" } }
     ] }
   ] };
 }
@@ -1659,20 +1659,33 @@ function cardOperatorId(eventBody) {
   const event = eventBody?.event || eventBody || {}; return event.operator?.open_id || event.operator?.user_id || event.operator?.id?.open_id || event.operator?.id?.user_id || "";
 }
 function skillRequestToast(type, content) { return { toast: { type, content } }; }
+function isValidWorkspaceId(value) { return /^[a-zA-Z0-9_-]{3,80}$/.test(String(value || "")); }
+function workspaceDbExists(workspaceId) {
+  if (!isValidWorkspaceId(workspaceId)) return false;
+  if (workspaceId === LEGACY_OWNER_ID) return fs.existsSync(path.join(WORKSPACES_DIR, workspaceId, "studio.json")) || fs.existsSync(ROOT_DB_PATH);
+  return fs.existsSync(path.join(WORKSPACES_DIR, workspaceId, "studio.json"));
+}
 function handleFeishuCardAction(eventBody) {
-  const db = readDb(); const value = cardActionValue(eventBody);
+  const value = cardActionValue(eventBody);
   if (value.source === "tona_document_delivery" && value.requestId) {
+    const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+    const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
+    if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast("warning", "\u8be5\u6587\u6863\u4ea4\u4ed8\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002");
+    const db = workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => readDb());
     const request = documentRequestEntries(db).find((item) => item.id === value.requestId);
-    if (!request) return skillRequestToast("warning", "\u8be5\u6587\u6863\u4ea4\u4ed8\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002");
+    if (!request || (request.workspaceId && request.workspaceId !== requestedWorkspaceId)) return skillRequestToast("warning", "\u8be5\u6587\u6863\u4ea4\u4ed8\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002");
+    const incomingAppId = eventBody?.header?.app_id || eventBody?.app_id || "";
+    if (request.botAppId && request.botAppId !== incomingAppId) return skillRequestToast("warning", "\u8be5\u786e\u8ba4\u5361\u7247\u5fc5\u987b\u7531\u539f\u98de\u4e66\u673a\u5668\u4eba\u56de\u8c03\u3002");
     const operatorId = cardOperatorId(eventBody);
     if (request.requestedBy && operatorId && request.requestedBy !== operatorId) return skillRequestToast("warning", "\u53ea\u6709\u53d1\u8d77\u8be5\u8bf7\u6c42\u7684\u7528\u6237\u53ef\u4ee5\u786e\u8ba4\u3002");
     if (request.status !== "pending") return skillRequestToast("info", "\u8be5\u6587\u6863\u8bf7\u6c42\u5df2\u5904\u7406\uff1a" + request.status + "\u3002");
     request.approvedBy = operatorId || request.requestedBy || ""; request.updatedAt = new Date().toISOString();
-    if (value.action === "reject") { request.status = "rejected"; writeDb(db); return skillRequestToast("info", "\u5df2\u53d6\u6d88\uff0c\u672c\u6b21\u4e0d\u4f1a\u521b\u5efa\u98de\u4e66\u6587\u6863\u3002"); }
-    request.status = "approved"; writeDb(db);
-    scheduleDocumentDelivery(activeWorkspaceId() || "usr_owner", request.id);
+    if (value.action === "reject") { request.status = "rejected"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db)); return skillRequestToast("info", "\u5df2\u53d6\u6d88\uff0c\u672c\u6b21\u4e0d\u4f1a\u521b\u5efa\u98de\u4e66\u6587\u6863\u3002"); }
+    request.status = "approved"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db));
+    scheduleDocumentDelivery(requestedWorkspaceId, request.id);
     return skillRequestToast("success", "\u5df2\u5f00\u59cb\u751f\u6210\u6587\u6863\uff0c\u5b8c\u6210\u540e\u4f1a\u5728\u5f53\u524d\u4f1a\u8bdd\u56de\u4f20\u94fe\u63a5\u3002");
   }
+  const db = readDb();
   if (value.source !== "tona_skill_request" || !value.requestId) return skillRequestToast("warning", "这不是 TONA 的能力申请卡片。");
   const request = skillRequestEntries(db).find((item) => item.id === value.requestId);
   if (!request) return skillRequestToast("warning", "该申请已过期或不属于当前工作区。");
@@ -1685,7 +1698,6 @@ function handleFeishuCardAction(eventBody) {
   if (request.kind === "user_oauth") { request.status = "oauth_requested"; writeDb(db); return skillRequestToast("success", "授权意图已确认。需要先为该飞书应用配置 OAuth 回调和权限范围，TONA 才会打开个人授权页。"); }
   request.status = "implementation_requested"; writeDb(db); return skillRequestToast("info", "技能申请已记录；当前版本尚未安装该技能执行器，因此不会自动执行。");
 }
-
 
 async function processFeishuMessageEvent(eventBody, botConfig = null) {
   const db = readDb();
