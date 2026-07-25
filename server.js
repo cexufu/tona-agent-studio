@@ -544,11 +544,10 @@ function collaborationTaskAlreadyStarted(db, messageId) {
 }
 
 function createCollaborationTask(db, message, bot, plan) {
-  const task = { id: crypto.randomUUID().slice(0, 8), sourceMessageId: message.messageId, chatId: message.chatId || "", startedBy: message.senderId || "", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: "active", maxMessages: COLLABORATION_MAX_MESSAGES, messageCount: 0, coordinatorAgentId: plan.coordinatorAgentId, writerAgentId: plan.writerAgentId, participantAgentIds: plan.participantAgentIds, rounds: plan.rounds, sequence: collaborationTaskSequence(plan), nextAgentId: bot.agentId, contributions: [] };
+  const task = { id: crypto.randomUUID().slice(0, 8), sourceMessageId: message.messageId, chatId: message.chatId || "", startedBy: message.senderId || "", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: "active", maxMessages: COLLABORATION_MAX_MESSAGES, messageCount: 0, coordinatorAgentId: plan.coordinatorAgentId, writerAgentId: plan.writerAgentId, participantAgentIds: plan.participantAgentIds, rounds: plan.rounds, sequence: collaborationTaskSequence(plan), nextAgentId: bot.agentId, contributions: [], decisionLog: [], quality: { status: "pending", checks: ["addresses the user task", "states evidence and assumptions", "resolves key disagreement", "gives an executable next step", "marks remaining uncertainty"] } };
   collaborationTasks(db).push(task);
   return task;
 }
-
 function findCollaborationTask(db, taskId) { return collaborationTasks(db).find((task) => task.id === taskId && task.status === "active") || null; }
 function collaborationAgentName(db, agentId) { return db.agents.find((agent) => agent.id === agentId)?.name || agentId; }
 
@@ -1429,20 +1428,22 @@ async function sendFeishuMessageToChat(settings, chatId, messageType, content) {
   return payload;
 }
 
+function collaborationStage(task, position) {
+  const total = task.sequence.length;
+  if (position === 1) return { id: "frame", label: "\u4efb\u52a1\u6f84\u6e05\u4e0e\u9a8c\u6536", instruction: "Define the decision to make, concrete deliverable, key assumptions, and who should examine which risk." };
+  if (position === total) return { id: "deliver", label: "\u8d28\u91cf\u9a8c\u6536\u4e0e\u6700\u7ec8\u4ea4\u4ed8", instruction: "Synthesize only after checking every quality criterion. Resolve conflicts instead of listing disconnected opinions." };
+  if (position === total - 1) return { id: "converge", label: "\u4ea4\u53c9\u590d\u6838\u4e0e\u6536\u655b", instruction: "Challenge the most consequential weak claim, reconcile disagreements, and state the recommendation that the final writer should adopt." };
+  return { id: "analyze", label: "\u4e13\u4e1a\u5206\u6790\u4e0e\u63a5\u529b", instruction: "Add a distinct professional contribution. Build on or challenge a specific prior claim; do not repeat it." };
+}
 function collaborationPrompt(task, message, db, agentId, groupContext) {
   const prior = task.contributions.map((item) => item.agentName + ": " + item.content).join("\n\n");
-  const position = task.messageCount;
-  const isFinal = position >= task.sequence.length || agentId === task.writerAgentId && position === task.sequence.length;
-  return [
-    "This is a system-managed Feishu multi-agent collaboration.",
-    "Task id: " + task.id + ". You are contribution " + position + " of " + task.sequence.length + ".",
-    isFinal
-      ? "You are the final writer. Synthesize the discussion into a concrete, decision-ready deliverable. Do not mention this internal orchestration."
-      : "Respond naturally to the prior discussion: build on it, question it, resolve a disagreement, or add the next missing decision. You are already invited into this collaboration, so do not wait for a new @ mention. Keep the contribution focused; do not greet, repeat previous work, or claim access to missing context.",
-    "Task: " + message.text,
-    "Relevant group context: " + (groupContext || "none"),
-    "Prior contributions: " + (prior || "none")
-  ].join("\n\n");
+  const position = task.messageCount; const stage = collaborationStage(task, position);
+  const agent = (db.agents || []).find((item) => item.id === agentId); const nextAgentId = task.nextAgentId || "";
+  const nextName = nextAgentId ? collaborationAgentName(db, nextAgentId) : "the task requester";
+  const shared = ["This is a system-managed Feishu multi-agent collaboration. Reply in Chinese.", "Task id: " + task.id + ". Stage: " + stage.label + ". Contribution " + position + " of " + task.sequence.length + ".", "Your role: " + (agent?.name || agentId) + ". Role focus: " + (agent?.role || "professional analysis") + ".", "Working rule: advance the task. Make one clear claim, name its evidence or assumption, and either improve or challenge a prior claim. Never greet, repeat the task, pretend to browse, or claim tools/data you did not use.", "Stage instruction: " + stage.instruction, "Task: " + message.text, "Relevant group context: " + (groupContext || "none"), "Prior contributions: " + (prior || "none")];
+  if (stage.id === "deliver") shared.push("Before finalizing, verify: " + (task.quality?.checks || []).join("; ") + ". Use exactly these concise sections: \u3010\u7ed3\u8bba\u3011, \u3010\u884c\u52a8\u8ba1\u5212\u3011, \u3010\u98ce\u9669\u4e0e\u5f85\u786e\u8ba4\u3011, \u3010\u8bf7\u7528\u6237\u786e\u8ba4\u3011. The final line must explicitly invite @" + nextName + " to decide the next step.");
+  else shared.push("Use exactly these concise sections: \u3010\u672c\u8f6e\u5224\u65ad\u3011, \u3010\u4f9d\u636e\u6216\u5047\u8bbe\u3011, \u3010\u98ce\u9669/\u5206\u6b67\u3011, \u3010\u4ea4\u7ed9\u4e0b\u4e00\u4f4d\u3011. The last section must state the single question or decision for @" + nextName + ".");
+  return shared.join("\n\n");
 }
 
 async function collaborationHandoffTarget(db, task, message) {
@@ -1458,10 +1459,9 @@ async function collaborationHandoffTarget(db, task, message) {
 function collaborationVisibleMessage(task, db, agentId, content, handoffTarget) {
   const role = collaborationAgentName(db, agentId);
   const isFinal = task.messageCount >= task.sequence.length || agentId === task.writerAgentId && task.messageCount === task.sequence.length;
-  const title = isFinal
-    ? "协作交付｜" + role
-    : "协作第 " + task.messageCount + "/" + task.sequence.length + " 步｜" + role;
-  const handoffText = handoffTarget?.final ? " 请确认本次交付，并决定下一步。" : " 请接续讨论，回应并推进上一轮的结论。";
+  const stage = collaborationStage(task, task.messageCount);
+  const title = isFinal ? "\u534f\u4f5c\u4ea4\u4ed8\uff5c" + role : "\u534f\u4f5c " + task.messageCount + "/" + task.sequence.length + "\uff5c" + stage.label + "\uff5c" + role;
+  const handoffText = handoffTarget?.final ? " \u8bf7\u9a8c\u6536\u4ea4\u4ed8\uff0c\u5e76\u660e\u786e\u4e0b\u4e00\u6b65\u6216\u8865\u5145\u8981\u6c42\u3002" : " \u8bf7\u9488\u5bf9\u4e0a\u4e00\u8f6e\u7684\u5224\u65ad\u7ee7\u7eed\u8865\u5145\u3001\u8d28\u7591\u6216\u6536\u655b\uff0c\u4e0d\u8981\u91cd\u590d\u8868\u8ff0\u3002";
   const post = feishuPostContent(content, title);
   post.zh_cn.content.push([{ tag: "at", user_id: handoffTarget.id, user_name: handoffTarget.name }, { tag: "text", text: handoffText }]);
   return post;
@@ -1520,7 +1520,9 @@ async function runServerManagedCollaboration(db, task, message, sourceBot) {
 
   task.status = "completed";
   task.nextAgentId = "";
-  task.updatedAt = new Date().toISOString();
+  task.completedAt = new Date().toISOString();
+  task.quality = { ...(task.quality || {}), status: "self_checked", checkedAt: task.completedAt };
+  task.updatedAt = task.completedAt;
   writeDb(db);
 }
 

@@ -118,6 +118,7 @@ async function waitFor(check, label) {
     }, "server-managed task completion");
     const task = (storedDb().settings.collaborationTasks || []).find((item) => item.sourceMessageId === "server_managed_task");
     if (task.contributions.length !== task.sequence.length || task.messageCount !== task.sequence.length) throw new Error("Scheduler did not execute every controlled contribution");
+    if (task.quality?.status !== "self_checked") throw new Error("Scheduler did not record its final quality checkpoint");
     if (deliveries.length !== task.sequence.length) throw new Error("Expected one Feishu delivery per collaboration contribution");
     if (!deliveries[0].path.includes("/reply")) throw new Error("The coordinator should reply to the initiating task message");
     if (deliveries.slice(1).some((delivery) => !delivery.path.includes("receive_id_type=chat_id"))) throw new Error("Follow-up roles were not sent directly to the group");
