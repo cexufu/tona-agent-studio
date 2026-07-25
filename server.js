@@ -612,6 +612,16 @@ function normalizeSkill(input) {
   };
 }
 
+function deleteSkill(db, skillId) {
+  const index = (db.workflows || []).findIndex((skill) => skill.id === skillId);
+  if (index < 0) {
+    const error = new Error('Skill not found.');
+    error.statusCode = 404;
+    throw error;
+  }
+  return db.workflows.splice(index, 1)[0];
+}
+
 function agentDependencies(db, agentId) {
   const skillNames = (db.workflows || [])
     .filter((skill) => (skill.steps || []).some((step) => step.agentId === agentId))
@@ -1874,6 +1884,13 @@ async function handleApiInWorkspace(req, res, pathname) {
       const skill = upsertById(db.workflows, body);
       writeDb(db);
       return sendJson(res, 200, { skill });
+    }
+    const deleteSkillMatch = pathname.match(/^\/api\/skills\/([A-Za-z0-9_-]{1,80})$/);
+    if (req.method === "DELETE" && deleteSkillMatch) {
+      const db = readDb();
+      const skill = deleteSkill(db, deleteSkillMatch[1]);
+      writeDb(db);
+      return sendJson(res, 200, { ok: true, skill });
     }
     if (req.method === "POST" && pathname === "/api/workflows") {
       const body = await readBody(req);

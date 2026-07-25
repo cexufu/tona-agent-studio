@@ -531,6 +531,22 @@ async function saveWorkflow(event) {
   toast("Skill 已保存");
 }
 
+async function deleteSelectedWorkflow() {
+  const workflow = state.db.workflows.find((item) => item.id === state.selectedWorkflowId);
+  if (!workflow) return toast("\u8bf7\u5148\u9009\u62e9\u8981\u5220\u9664\u7684 Skill");
+  if (!window.confirm("\u786e\u5b9a\u5220\u9664 Skill \u201c" + workflow.name + "\u201d\u5417\uff1f\u4fdd\u7559\u5386\u53f2\u8fd0\u884c\u8bb0\u5f55\uff0c\u4f46\u4e0d\u80fd\u64a4\u9500\u5220\u9664\u3002")) return;
+  try {
+    await api("/api/skills/" + encodeURIComponent(workflow.id), { method: "DELETE" });
+    state.selectedWorkflowId = null;
+    await loadState();
+    state.selectedWorkflowId = state.db.workflows[0]?.id || null;
+    renderAll();
+    toast("Skill \u5df2\u5220\u9664");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function runWorkflow() {
   const workflow = currentWorkflow();
   const input = $("#workflowInput").value.trim();
@@ -713,6 +729,7 @@ function bindEvents() {
   bindIfPresent("#agentForm", "submit", saveAgent);
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);
   bindIfPresent("#workflowForm", "submit", saveWorkflow);
+  bindIfPresent("#deleteWorkflowButton", "click", deleteSelectedWorkflow);
   bindIfPresent("#larkForm", "submit", saveLarkSettings);
   bindIfPresent("#larkAppForm", "submit", saveLarkAppSettings);
   bindIfPresent("#larkBotForm", "submit", saveLarkBot);

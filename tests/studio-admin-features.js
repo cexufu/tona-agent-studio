@@ -54,6 +54,11 @@ async function waitUntilReady() {
     await request("/api/skills", { method: "POST", body: JSON.stringify({ id: "test_skill", name: "Test Skill", description: "test", enabled: true, steps: [{ agentId: "daily_assistant", task: "complete" }] }) });
     const deleted = await request("/api/agents/temporary_agent", { method: "DELETE" });
     if (deleted.status !== 200 || !deleted.body.ok) throw new Error("Unreferenced agent was not deleted");
+    const deletedSkill = await request("/api/skills/test_skill", { method: "DELETE" });
+    if (deletedSkill.status !== 200 || !deletedSkill.body.ok) throw new Error("Skill deletion endpoint failed");
+    const skillsAfterDelete = await request("/api/skills");
+    if (skillsAfterDelete.body.skills.some((skill) => skill.id === "test_skill")) throw new Error("Deleted Skill remained in registry");
+
     console.log("Studio admin features passed: Skill Center, safe agent deletion, and model cost tracking.");
   } finally {
     child?.kill();
