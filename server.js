@@ -264,7 +264,7 @@ function createInitialDb() {
     const existingIds = new Set(PERSONAL_AGENT_TEMPLATES.map((agent) => agent.id));
     db.agents = [...PERSONAL_AGENT_TEMPLATES, ...db.agents.filter((agent) => !existingIds.has(agent.id))];
   }
-  db.settings = { ...db.settings, defaultProviderId: "deepseek", botConversationMaxRounds: 10, larkBots: [], collaborationPolicy: defaultCollaborationPolicy(db.agents), collaborationTasks: [] };
+  db.settings = { ...db.settings, defaultProviderId: "deepseek", botConversationMaxRounds: 10, larkBots: [], collaborationPolicy: defaultCollaborationPolicy(db.agents), collaborationTasks: [], assistantTasks: [] };
   return db;
 }
 
@@ -367,7 +367,7 @@ function writeDb(db) {
 
 function publicDb(db) {
   const settings = db.settings || {};
-  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, ...safeSettings } = settings;
+  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, assistantTasks, ...safeSettings } = settings;
   return {
     ...db,
     providers: db.providers.map((provider) => ({
@@ -1528,6 +1528,24 @@ async function runServerManagedCollaboration(db, task, message, sourceBot) {
 
 
 const FEISHU_DOCUMENT_TOOL_SCOPES = ["docx:document:readonly", "docx:document:write_only", "drive:drive.metadata:readonly"];
+function assistantTaskEntries(db) {
+  db.settings ||= {};
+  db.settings.assistantTasks = Array.isArray(db.settings.assistantTasks) ? db.settings.assistantTasks : [];
+  return db.settings.assistantTasks;
+}
+function createAssistantTask(db, payload) {
+  const task = { id: 'task_' + crypto.randomUUID().slice(0, 12), status: 'pending_confirmation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...payload };
+  const tasks = assistantTaskEntries(db); tasks.push(task); db.settings.assistantTasks = tasks.slice(-300); writeDb(db); return task;
+}
+function wantsCalendarAction(text) { return /(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u5165|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88).{0,12}(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386)|(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386).{0,12}(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88)/u.test(String(text || '')); }
+function calendarTaskFromText(text) { const source = String(text || '').trim(); const title = source.replace(/^(?:\u8bf7)?(?:\u5e2e\u6211)?(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u4e00\u4e2a|\u5efa\u4e00\u4e2a)(?:\u4f1a\u8bae|\u4f1a\u8bae\u65e5\u7a0b|\u65e5\u7a0b)[\uff1a:\s]*/u, '').trim() || source; return { title: title.slice(0,100), source }; }
+function calendarTaskCard(task) { return { config:{wide_screen_mode:true}, header:{title:{tag:'plain_text',content:'TONA \u65e5\u7a0b\u5f85\u786e\u8ba4'},template:'blue'}, elements:[
+  {tag:'div',text:{tag:'lark_md',content:'**\u5f85\u5b89\u6392\u4e8b\u9879\uff1a** '+task.title+'\n\nTONA \u4f1a\u5148\u628a\u65e5\u7a0b\u8bf7\u6c42\u8bb0\u5165\u4f60\u7684\u5de5\u4f5c\u53f0\uff0c\u8bf7\u4f60\u786e\u8ba4\u662f\u5426\u4ea4\u7ed9\u65e5\u5386\u52a9\u624b\u7ee7\u7eed\u5904\u7406\u3002'}},
+  {tag:'note',elements:[{tag:'plain_text',content:'\u65e5\u5386\u5199\u5165\u4f1a\u5f71\u54cd\u771f\u5b9e\u65f6\u95f4\u5b89\u6392\u3002\u5728\u4e2a\u4eba\u65e5\u5386 OAuth \u6388\u6743\u6b63\u5f0f\u63a5\u901a\u524d\uff0cTONA \u53ea\u4f1a\u8bb0\u5f55\u8ba1\u5212\uff0c\u4e0d\u4f1a\u81ea\u884c\u521b\u5efa\u4f1a\u8bae\u3002'}]},
+  {tag:'action',actions:[{tag:'button',text:{tag:'plain_text',content:'\u786e\u8ba4\u7ee7\u7eed\u5904\u7406'},type:'primary',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'approve'}},{tag:'button',text:{tag:'plain_text',content:'\u6682\u4e0d\u5b89\u6392'},type:'default',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'reject'}}]}
+]}; }
+function calendarTaskResultPost(task) { return feishuPostContent('\u65e5\u7a0b\u4efb\u52a1\u5df2\u8bb0\u5f55\uff1a'+task.title+'\n\n\u5f53\u524d\u72b6\u6001\uff1a\u7b49\u5f85\u4e2a\u4eba\u65e5\u5386\u6388\u6743\u63a5\u5165\u3002\n\n\u4f60\u53ef\u7ee7\u7eed\u8865\u5145\u53c2\u4f1a\u4eba\u3001\u65f6\u95f4\u7a97\u53e3\u548c\u4f1a\u8bae\u65f6\u957f\uff1bTONA \u4f1a\u5728\u6388\u6743\u5b8c\u6210\u540e\u751f\u6210\u5019\u9009\u65f6\u95f4\u5e76\u518d\u6b21\u8bf7\u4f60\u786e\u8ba4\u3002','\u65e5\u7a0b\u52a9\u7406'); }
+function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); return {status:!enabledBots.length||!providersReady.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:providersReady.map((provider)=>provider.name),replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title,status:item.status,updatedAt:item.updatedAt}))}; }
 function documentRequestEntries(db) {
   db.settings ||= {};
   db.settings.documentRequests = Array.isArray(db.settings.documentRequests) ? db.settings.documentRequests : [];
@@ -1710,6 +1728,19 @@ function workspaceDbExists(workspaceId) {
 }
 function handleFeishuCardAction(eventBody) {
   const value = cardActionValue(eventBody);
+  if (value.source === 'tona_calendar_plan' && value.taskId) {
+    const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID; const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
+    if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast('warning','\u8be5\u65e5\u7a0b\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002');
+    const db=workspaceContext.run({workspaceId:requestedWorkspaceId},()=>readDb()); const task=assistantTaskEntries(db).find((item)=>item.id===value.taskId&&item.type==='calendar');
+    if (!task || task.workspaceId !== requestedWorkspaceId) return skillRequestToast('warning','\u8be5\u65e5\u7a0b\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002');
+    const incomingAppId=eventBody?.header?.app_id||eventBody?.app_id||''; if(task.botAppId&&task.botAppId!==incomingAppId)return skillRequestToast('warning','\u8bf7\u4f7f\u7528\u539f\u98de\u4e66\u673a\u5668\u4eba\u786e\u8ba4\u8be5\u65e5\u7a0b\u3002');
+    const operatorId=cardOperatorId(eventBody); if(task.requestedBy&&operatorId&&task.requestedBy!==operatorId)return skillRequestToast('warning','\u53ea\u6709\u53d1\u8d77\u8bf7\u6c42\u7684\u7528\u6237\u53ef\u4ee5\u786e\u8ba4\u3002');
+    if(task.status!=='pending_confirmation')return skillRequestToast('info','\u8be5\u65e5\u7a0b\u4efb\u52a1\u5df2\u5904\u7406\uff1a'+task.status+'\u3002'); task.updatedAt=new Date().toISOString(); task.approvedBy=operatorId||task.requestedBy||'';
+    if(value.action==='reject'){task.status='cancelled';workspaceContext.run({workspaceId:requestedWorkspaceId},()=>writeDb(db));return skillRequestToast('info','\u5df2\u53d6\u6d88\uff0c\u4e0d\u4f1a\u5f71\u54cd\u4efb\u4f55\u65e5\u7a0b\u3002');}
+    task.status='awaiting_calendar_oauth';workspaceContext.run({workspaceId:requestedWorkspaceId},()=>writeDb(db));const bot=(db.settings?.larkBots||[]).find((item)=>item.id===task.botId);
+    if(bot)setImmediate(()=>workspaceContext.run({workspaceId:requestedWorkspaceId},async()=>{try{await sendFeishuMessageToChat(larkBotToAppSettings(bot),task.chatId,'post',calendarTaskResultPost(task));}catch(error){logServerError(error);}}));
+    return skillRequestToast('success','\u65e5\u7a0b\u8bf7\u6c42\u5df2\u8bb0\u5f55\uff0c\u4e0d\u4f1a\u76f4\u63a5\u5199\u5165\u4f60\u7684\u65e5\u5386\u3002');
+  }
   if (value.source === "tona_document_delivery" && value.requestId) {
     const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
     const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
@@ -1776,6 +1807,12 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
     if (wantsFeishuDocumentDelivery(message.text)) {
       const request = createDocumentDeliveryRequest(db, message, bot);
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, documentDeliveryCard(request));
+      return;
+    }
+    if (wantsCalendarAction(message.text)) {
+      const calendar=calendarTaskFromText(message.text);
+      const task=createAssistantTask(db,{type:'calendar',title:calendar.title,sourceText:calendar.source,requestedBy:message.senderId||'',chatId:message.chatId||'',messageId:message.messageId||'',botId:bot?.id||'',botAppId:bot?.appId||'',workspaceId:activeWorkspaceId()||LEGACY_OWNER_ID});
+      await replyFeishuInteractiveCard(larkBotToAppSettings(bot),message.messageId,calendarTaskCard(task));
       return;
     }
     const decisionMakerAllowed = !policy.decisionMakerOpenIds.length || policy.decisionMakerOpenIds.includes(message.senderId);
@@ -2013,6 +2050,9 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     if (req.method === "GET" && pathname === "/api/state") {
       return sendJson(res, 200, publicDb(readDb()));
+    }
+    if (req.method === "GET" && pathname === "/api/assistant-health") {
+      return sendJson(res, 200, assistantHealth(readDb()));
     }
     if (req.method === "GET" && pathname === "/api/runs") {
       return sendJson(res, 200, listRuns());

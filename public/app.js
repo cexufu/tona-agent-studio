@@ -99,6 +99,27 @@ function renderAll() {
   renderLarkBots();
   renderLarkBotForm();
   renderLarkAppDiagnosis();
+  refreshAssistantHealth();
+}
+
+async function refreshAssistantHealth() {
+  const box = document.querySelector('#assistantHealthBox');
+  if (!box) return;
+  try {
+    const health = await api('/api/assistant-health');
+    const labels = { ready: '\u8fd0\u884c\u6b63\u5e38', attention: '\u9700\u8981\u5904\u7406', setup_needed: '\u5c1a\u672a\u5c31\u7eea' };
+    const stateClass = health.status === 'ready' ? 'enabled' : health.status === 'attention' ? 'error' : 'disabled';
+    const taskRows = (health.pendingTasks || []).map((task) => '<li><strong>' + escapeHtml(task.title) + '</strong><span>' + escapeHtml(task.status === 'awaiting_calendar_oauth' ? '\u7b49\u5f85\u65e5\u5386\u6388\u6743' : '\u7b49\u5f85\u4f60\u786e\u8ba4') + '</span></li>').join('');
+    const failure = health.replyFailures?.[0];
+    box.innerHTML = '<div class="panel-heading"><h3>\u5728\u7ebf\u52a9\u7406\u72b6\u6001</h3><button id="refreshAssistantHealthButton" type="button">\u5237\u65b0\u72b6\u6001</button></div>' +
+      '<div class="health-grid"><div><span class="pill ' + stateClass + '">' + labels[health.status] + '</span><p>\u5df2\u5c31\u7eea\u673a\u5668\u4eba\uff1a' + Number(health.botsReady || 0) + '</p><p>\u53ef\u7528\u6a21\u578b\uff1a' + escapeHtml((health.providersReady || []).join(' / ') || '\u65e0') + '</p></div>' +
+      '<div><p>\u6700\u8fd1\u98de\u4e66\u4e8b\u4ef6\uff1a' + escapeHtml(health.latestEventAt || '\u5c1a\u672a\u6536\u5230') + '</p><p>' + escapeHtml(health.latestEventSummary || '\u7528 @ \u673a\u5668\u4eba\u53d1\u9001\u4e00\u6761\u6d88\u606f\u5373\u53ef\u9a8c\u8bc1') + '</p></div></div>' +
+      (failure ? '<div class="health-error">\u6700\u8fd1\u5f02\u5e38\uff1a' + escapeHtml(failure.replyError || failure.decryptError) + '</div>' : '') +
+      (taskRows ? '<div class="health-tasks"><strong>\u5f85\u5904\u7406\u4e8b\u9879</strong><ul>' + taskRows + '</ul></div>' : '<div class="meta">\u5f53\u524d\u6ca1\u6709\u5f85\u786e\u8ba4\u7684\u65e5\u7a0b\u6216\u5916\u90e8\u64cd\u4f5c\u3002</div>');
+    document.querySelector('#refreshAssistantHealthButton')?.addEventListener('click', refreshAssistantHealth);
+  } catch (error) {
+    box.innerHTML = '<div class="panel-heading"><h3>\u5728\u7ebf\u52a9\u7406\u72b6\u6001</h3></div><div class="health-error">' + escapeHtml(error.message) + '</div>';
+  }
 }
 
 async function refreshDiagnosis() {
@@ -738,6 +759,7 @@ function bindEvents() {
   bindIfPresent("#testLarkBotButton", "click", testLarkBot);
   bindIfPresent("#testLarkButton", "click", testLark);
   bindIfPresent("#testProviderButton", "click", testProvider);
+  bindIfPresent("#refreshAssistantHealthButton", "click", refreshAssistantHealth);
   bindIfPresent("#refreshRunsButton", "click", loadRuns);
   bindIfPresent("#runCollaborationPilotButton", "click", runCollaborationPilot);
 

@@ -347,6 +347,14 @@ textarea {
   border: 1px solid var(--line);
 }
 
+.assistant-health { margin: 0 0 18px; }
+.health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.health-grid p { margin: 8px 0 0; color: var(--muted); }
+.health-error { margin-top: 12px; padding: 10px 12px; border-radius: 6px; background: #f7e8e5; color: var(--danger); line-height: 1.5; }
+.health-tasks { margin-top: 14px; }
+.health-tasks ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 7px; }
+.health-tasks li { display: flex; justify-content: space-between; gap: 16px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.health-tasks li span { color: var(--muted); font-size: 13px; }
 .cards,
 .run-list {
   display: grid;
@@ -488,6 +496,10 @@ textarea {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .health-grid {
     grid-template-columns: 1fr;
   }
 

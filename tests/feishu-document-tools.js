@@ -85,6 +85,7 @@ function messageEvent(messageId, text) {
     if (!calls.some((call) => call.path === '/open-apis/docx/v1/documents/doc_created_123/blocks/doc_created_123/children' && call.body.children?.some((child) => child.block_type === 31))) throw new Error('Markdown table was not created as a native Feishu table');
     if (calls.filter((call) => /^\/open-apis\/docx\/v1\/documents\/doc_created_123\/blocks\/text_cell_\d+$/.test(call.path) && call.method === 'PATCH').length !== 6) throw new Error('Native table cells were not populated');
     if (!writeCall?.body.children?.some((child) => child.block_type === 3 && child.heading1)) throw new Error('Markdown heading was not rendered as a native Feishu heading');
+    await waitFor(() => calls.some((call) => call.path.startsWith('/open-apis/im/v1/messages?receive_id_type=chat_id')), 'document result message');
     const resultCall = calls.find((call) => call.path.startsWith('/open-apis/im/v1/messages?receive_id_type=chat_id'));
     if (!resultCall || !JSON.parse(resultCall.body.content).elements[0].text.content.includes('https://feishu.cn/docx/doc_created_123')) throw new Error('Document result card was not returned to the originating chat');
 
