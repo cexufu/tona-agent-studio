@@ -54,8 +54,8 @@ const DEFAULT_DB = {
       type: "openai_compatible",
       baseUrl: "https://api.deepseek.com",
       apiKey: "",
-      defaultModel: "deepseek-chat",
-      models: ["deepseek-chat", "deepseek-reasoner"],
+      defaultModel: "deepseek-v4-pro",
+      models: ["deepseek-v4-pro", "deepseek-v4-flash"],
       enabled: false,
       notes: "OpenAI-compatible endpoint."
     },
@@ -105,7 +105,7 @@ const DEFAULT_DB = {
       guardrails: "Do not rewrite everything. Suggest minimal corrections.",
       outputFormat: "# Critical Review\n## 1. Biggest Weakness\n## 2. Unsupported Claims\n## 3. Conceptual Confusion\n## 4. Execution Risks\n## 5. Suggested Fixes",
       providerId: "deepseek",
-      model: "deepseek-chat",
+      model: "deepseek-v4-pro",
       temperature: 0.2,
       skills: ["critique", "save_output"]
     },
@@ -168,7 +168,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "不要编造日历或外部事实；没有接入真实日历时要说明只能帮用户整理和生成日程建议；涉及重要安排要复述确认。",
     outputFormat: "默认 1-3 段中文短回复；需要时给简短清单。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.45,
     skills: ["daily", "chat"]
   },
@@ -181,7 +181,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "不伪造文献和引用；信息不足时主动说明不确定性；不要把闲聊硬写成科研报告。",
     outputFormat: "日常讨论用自然中文；明确要求分析时使用：核心判断、依据、可能反例、下一步。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.45,
     skills: ["research", "chat"]
   },
@@ -194,7 +194,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "不能真实运行数据时要说明；计算题要展示关键步骤；不要把近似值说成精确事实。",
     outputFormat: "先给结论，再给关键步骤；复杂问题给公式/伪代码/表格。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.25,
     skills: ["data", "chat"]
   },
@@ -207,7 +207,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "不要假装看过未提供的代码；高风险命令要提醒；优先给可运行、可验证的方案。",
     outputFormat: "默认简洁说明 + 必要代码块；教学时按步骤解释。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.25,
     skills: ["coding", "chat"]
   },
@@ -220,7 +220,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "明确这是娱乐和反思，不作为医疗、法律、投资等重大决策依据；不做恐吓式断言。",
     outputFormat: "先给一句总体感觉，再给 3-5 点解读和一个现实建议。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.65,
     skills: ["fortune", "chat"]
   },
@@ -233,7 +233,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "不做过度承诺；涉及重大选择时呈现权衡；区分事实、判断和建议。",
     outputFormat: "默认：判断、机会、风险、下一步行动。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.45,
     skills: ["career", "chat"]
   },
@@ -246,7 +246,7 @@ const PERSONAL_AGENT_TEMPLATES = [
     guardrails: "不编造经历；避免低质标题党；保留用户个人气质和学术可信度。",
     outputFormat: "默认给：选题角度、标题备选、开头、正文结构、发布建议。",
     providerId: "deepseek",
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     temperature: 0.65,
     skills: ["media", "chat"]
   }
@@ -321,6 +321,20 @@ function transformSecrets(value, transform) {
   for (const [key, item] of Object.entries(value)) copy[key] = SECRET_FIELDS.has(key) ? transform(item) : transformSecrets(item, transform);
   return copy;
 }
+const DEEPSEEK_RETIRED_MODEL_IDS = new Set(["deepseek-chat", "deepseek-reasoner"]);
+const DEEPSEEK_RECOMMENDED_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash"];
+function migrateRetiredDeepSeekModels(db) {
+  const provider = (db.providers || []).find((item) => item.id === "deepseek");
+  if (!provider) return false;
+  let changed = false;
+  if (DEEPSEEK_RETIRED_MODEL_IDS.has(String(provider.defaultModel || ""))) { provider.defaultModel = "deepseek-v4-pro"; changed = true; }
+  const mergedModels = [...new Set([...(provider.models || []).filter((model) => !DEEPSEEK_RETIRED_MODEL_IDS.has(String(model))), ...DEEPSEEK_RECOMMENDED_MODELS])];
+  if (JSON.stringify(mergedModels) !== JSON.stringify(provider.models || [])) { provider.models = mergedModels; changed = true; }
+  for (const agent of db.agents || []) {
+    if (agent.providerId === "deepseek" && DEEPSEEK_RETIRED_MODEL_IDS.has(String(agent.model || ""))) { agent.model = "deepseek-v4-pro"; changed = true; }
+  }
+  return changed;
+}
 const KIMI_RETIRED_MODEL_IDS = new Set(["kimi-k2", "kimi-k2-0905-preview", "kimi-k2-0711-preview", "kimi-k2-turbo-preview", "kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
 const KIMI_RECOMMENDED_MODELS = ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"];
 function migrateRetiredKimiModels(db) {
@@ -338,7 +352,9 @@ function migrateRetiredKimiModels(db) {
 function readDb() {
   ensureStore();
   const db = transformSecrets(JSON.parse(fs.readFileSync(storagePaths().dbPath, "utf8")), decryptSecretAtRest);
-  if (migrateRetiredKimiModels(db)) writeDb(db);
+  const deepSeekMigrated = migrateRetiredDeepSeekModels(db);
+  const kimiMigrated = migrateRetiredKimiModels(db);
+  if (deepSeekMigrated || kimiMigrated) writeDb(db);
   return db;
 }
 function writeDb(db) {
@@ -1850,6 +1866,8 @@ async function handleApiInWorkspace(req, res, pathname) {
           }
         }
       });
+      migrateRetiredDeepSeekModels(db);
+      migrateRetiredKimiModels(db);
       writeDb(db);
       return sendJson(res, 200, { provider: { ...provider, apiKey: maskKey(provider.apiKey) } });
     }
@@ -1865,8 +1883,10 @@ async function handleApiInWorkspace(req, res, pathname) {
       const body = await readBody(req);
       const db = readDb();
       const agent = upsertById(db.agents, body);
+      migrateRetiredDeepSeekModels(db);
+      migrateRetiredKimiModels(db);
       writeDb(db);
-      return sendJson(res, 200, { agent });
+      return sendJson(res, 200, { agent: db.agents.find((item) => item.id === agent.id) });
     }
     const deleteAgentMatch = pathname.match(/^\/api\/agents\/([A-Za-z0-9_-]{1,80})$/);
     if (req.method === "DELETE" && deleteAgentMatch) {
