@@ -5,8 +5,8 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
-const tonaPort = 17371;
-const feishuPort = 17372;
+const tonaPort = 17376;
+const feishuPort = 17377;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "tona-server-managed-collab-"));
 const deliveries = [];
 

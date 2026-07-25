@@ -359,12 +359,15 @@ function readDb() {
 }
 function writeDb(db) {
   ensureStore();
-  fs.writeFileSync(storagePaths().dbPath, JSON.stringify(transformSecrets(db, encryptSecretAtRest), null, 2));
+  const dbPath = storagePaths().dbPath;
+  const temporaryPath = dbPath + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
+  fs.writeFileSync(temporaryPath, JSON.stringify(transformSecrets(db, encryptSecretAtRest), null, 2));
+  fs.renameSync(temporaryPath, dbPath);
 }
 
 function publicDb(db) {
   const settings = db.settings || {};
-  const { collaborationTasks, groupKnowledge, skillRequests, ...safeSettings } = settings;
+  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, ...safeSettings } = settings;
   return {
     ...db,
     providers: db.providers.map((provider) => ({
@@ -1521,6 +1524,96 @@ async function runServerManagedCollaboration(db, task, message, sourceBot) {
   writeDb(db);
 }
 
+
+const FEISHU_DOCUMENT_TOOL_SCOPES = ["docx:document:readonly", "docx:document:write_only", "drive:drive.metadata:readonly"];
+function documentRequestEntries(db) {
+  db.settings ||= {};
+  db.settings.documentRequests = Array.isArray(db.settings.documentRequests) ? db.settings.documentRequests : [];
+  return db.settings.documentRequests;
+}
+function documentDeliveryTask(text) {
+  return String(text || "").replace(/^(?:\u8bf7)?(?:\u5e2e\u6211)?(?:\u751f\u6210|\u521b\u5efa|\u65b0\u5efa|\u4ea7\u51fa)(?:\u4e00\u4efd)?(?:\u98de\u4e66)?\u6587\u6863[\uff1a:\s]*/u, "").trim() || "\u6574\u7406\u5f53\u524d\u5bf9\u8bdd\u4e3a\u4e00\u4efd\u53ef\u6267\u884c\u6587\u6863";
+}
+function wantsFeishuDocumentDelivery(text) {
+  return /(?:\u751f\u6210|\u521b\u5efa|\u65b0\u5efa|\u4ea7\u51fa).{0,8}(?:\u98de\u4e66)?\u6587\u6863|(?:\u98de\u4e66)?\u6587\u6863.{0,8}(?:\u751f\u6210|\u521b\u5efa|\u65b0\u5efa|\u4ea7\u51fa)/u.test(String(text || ""));
+}
+function extractFeishuDocumentId(text) {
+  const source = String(text || "");
+  const urlMatch = source.match(/https?:\/\/[^\s)]+\/(?:docx|docs)\/([A-Za-z0-9_-]{8,})/i);
+  if (urlMatch) return urlMatch[1];
+  const tokenMatch = source.match(/(?:\u6587\u6863(?:ID|id)?[\uff1a:\s]*)([A-Za-z0-9_-]{8,})/u);
+  return tokenMatch ? tokenMatch[1] : "";
+}
+function wantsFeishuDocumentRead(text) {
+  const source = String(text || "");
+  return Boolean(extractFeishuDocumentId(source)) && /\u8bfb\u53d6|\u9605\u8bfb|\u603b\u7ed3|\u5206\u6790|\u63d0\u53d6|\u770b\u770b|\u6574\u7406/u.test(source);
+}
+function createDocumentDeliveryRequest(db, message, bot) {
+  const task = documentDeliveryTask(message.text);
+  const request = { id: "doc_" + crypto.randomUUID().slice(0, 12), status: "pending", task, title: task.slice(0, 60), requestedBy: message.senderId || "", requestedInChatId: message.chatId || "", requestedMessageId: message.messageId || "", botId: bot?.id || "", agentId: bot?.agentId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const requests = documentRequestEntries(db); requests.push(request); db.settings.documentRequests = requests.slice(-300); writeDb(db); return request;
+}
+function documentDeliveryCard(request) {
+  return { config: { wide_screen_mode: true }, header: { title: { tag: "plain_text", content: "TONA \u98de\u4e66\u6587\u6863\u4ea4\u4ed8" }, template: "blue" }, elements: [
+    { tag: "div", text: { tag: "lark_md", content: "**\u62df\u4ea4\u4ed8\u5185\u5bb9\uff1a** " + request.task + "\n\n\u786e\u8ba4\u540e\uff0cTONA \u5c06\u4f7f\u7528\u5f53\u524d\u89d2\u8272\u751f\u6210\u5185\u5bb9\u3001\u521b\u5efa\u4e00\u4efd\u65b0\u7684\u98de\u4e66\u6587\u6863\uff0c\u5e76\u628a\u94fe\u63a5\u56de\u4f20\u5230\u5f53\u524d\u4f1a\u8bdd\u3002" } },
+    { tag: "note", elements: [{ tag: "plain_text", content: "\u53ea\u4f1a\u65b0\u5efa\u6587\u6863\uff0c\u4e0d\u4f1a\u8986\u76d6\u5df2\u6709\u6587\u6863\u3002\u9700\u8981\u5728\u98de\u4e66\u5f00\u653e\u5e73\u53f0\u4e3a\u8be5\u5e94\u7528\u5f00\u901a\u6587\u6863\u8bfb\u5199\u6743\u9650\u3002" }] },
+    { tag: "action", actions: [
+      { tag: "button", text: { tag: "plain_text", content: "\u786e\u8ba4\u521b\u5efa\u6587\u6863" }, type: "primary", value: { source: "tona_document_delivery", requestId: request.id, action: "approve" } },
+      { tag: "button", text: { tag: "plain_text", content: "\u53d6\u6d88" }, type: "default", value: { source: "tona_document_delivery", requestId: request.id, action: "reject" } }
+    ] }
+  ] };
+}
+function documentDeliveryResultCard(request) {
+  const success = request.status === "completed";
+  return { config: { wide_screen_mode: true }, header: { title: { tag: "plain_text", content: success ? "TONA \u6587\u6863\u5df2\u4ea4\u4ed8" : "TONA \u6587\u6863\u4ea4\u4ed8\u5931\u8d25" }, template: success ? "green" : "red" }, elements: [
+    { tag: "div", text: { tag: "lark_md", content: success ? "**\u5185\u5bb9\uff1a** " + request.title + "\n\n[\u6253\u5f00\u98de\u4e66\u6587\u6863](" + request.documentUrl + ")" : "**\u4efb\u52a1\uff1a** " + request.title + "\n\n**\u539f\u56e0\uff1a** " + String(request.error || "\u672a\u77e5\u9519\u8bef").slice(0, 500) } },
+    { tag: "note", elements: [{ tag: "plain_text", content: success ? "\u6587\u6863\u5df2\u65b0\u5efa\u3002\u540e\u7eed\u53ef\u4ee5\u628a\u6587\u6863\u94fe\u63a5\u53d1\u7ed9\u673a\u5668\u4eba\uff0c\u8981\u6c42\u8bfb\u53d6\u3001\u603b\u7ed3\u6216\u7ee7\u7eed\u8865\u5145\u3002" : "\u8bf7\u68c0\u67e5\u8be5\u98de\u4e66\u5e94\u7528\u662f\u5426\u5df2\u5f00\u901a\u6587\u6863\u8bfb\u5199\u6743\u9650\uff0c\u5e76\u786e\u8ba4\u673a\u5668\u4eba\u62e5\u6709\u76ee\u6807\u4e91\u7a7a\u95f4\u7684\u53ef\u8bbf\u95ee\u8303\u56f4\u3002" }] }
+  ] };
+}
+async function feishuApi(settings, endpoint, options = {}) {
+  const token = await getFeishuTenantToken(settings);
+  const response = await fetch(FEISHU_OPEN_API_BASE + endpoint, { method: options.method || "GET", headers: { "Content-Type": "application/json", Authorization: "Bearer " + token, ...(options.headers || {}) }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || (payload.code !== undefined && payload.code !== 0)) throw new Error(payload.msg || payload.message || "Feishu API request failed: " + response.status);
+  return payload.data || payload;
+}
+function feishuTextChildren(content) {
+  return String(content || "").replace(/\r/g, "").split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 48).map((line) => ({ block_type: 2, text: { elements: [{ text_run: { content: line.slice(0, 1800) } }] } }));
+}
+async function createFeishuDocument(settings, title, content) {
+  const created = await feishuApi(settings, "/docx/v1/documents", { method: "POST", body: { title: String(title || "TONA \u6587\u6863").slice(0, 100) } });
+  const documentId = created.document?.document_id || created.document_id;
+  if (!documentId) throw new Error("Feishu did not return a document ID.");
+  const children = feishuTextChildren(content);
+  if (children.length) await feishuApi(settings, "/docx/v1/documents/" + encodeURIComponent(documentId) + "/blocks/" + encodeURIComponent(documentId) + "/children", { method: "POST", body: { children, index: 0 } });
+  return { documentId, documentUrl: "https://feishu.cn/docx/" + documentId };
+}
+function textFromFeishuBlock(block) { return (block?.text?.elements || []).map((element) => element.text_run?.content || element.mention_user?.user_id || element.equation?.content || "").join("").trim(); }
+async function readFeishuDocument(settings, documentId) {
+  const data = await feishuApi(settings, "/docx/v1/documents/" + encodeURIComponent(documentId) + "/blocks?page_size=200");
+  const lines = (data.items || data.blocks || []).map(textFromFeishuBlock).filter(Boolean);
+  if (!lines.length) throw new Error("The document is empty or the app cannot read its blocks.");
+  return lines.join("\n").slice(0, 24000);
+}
+function scheduleDocumentDelivery(workspaceId, requestId) {
+  setImmediate(() => workspaceContext.run({ workspaceId }, async () => {
+    const db = readDb(); const request = documentRequestEntries(db).find((item) => item.id === requestId);
+    if (!request || request.status !== "approved") return;
+    const bot = (db.settings?.larkBots || []).find((item) => item.id === request.botId);
+    if (!bot) { request.status = "failed"; request.error = "The linked Feishu bot is no longer configured."; request.updatedAt = new Date().toISOString(); writeDb(db); return; }
+    try {
+      request.status = "generating"; request.updatedAt = new Date().toISOString(); writeDb(db);
+      const content = await runAgentReply(db, request.agentId || "daily_assistant", "Create a polished Chinese Feishu document for the following task. Use clear sections, concise paragraphs, concrete next steps, and state uncertainty where evidence is missing. Do not claim external access.\n\nTask:\n" + request.task);
+      const document = await createFeishuDocument(larkBotToAppSettings(bot), request.title, content);
+      request.status = "completed"; request.documentId = document.documentId; request.documentUrl = document.documentUrl; request.completedAt = new Date().toISOString(); request.updatedAt = request.completedAt; writeDb(db);
+      await sendFeishuMessageToChat(larkBotToAppSettings(bot), request.requestedInChatId, "interactive", documentDeliveryResultCard(request));
+    } catch (error) {
+      request.status = "failed"; request.error = error.message; request.updatedAt = new Date().toISOString(); writeDb(db);
+      try { await sendFeishuMessageToChat(larkBotToAppSettings(bot), request.requestedInChatId, "interactive", documentDeliveryResultCard(request)); } catch (deliveryError) { logServerError(deliveryError); }
+    }
+  }));
+}
+
 const FEISHU_CAPABILITY_REQUESTS = [
   { id: "read_feishu_docs", title: "读取飞书文档", kind: "user_oauth", scopes: ["docx:document:readonly", "drive:drive.metadata:readonly"], purpose: "读取你明确授权的文档，用于总结、问答或研究分析。", risk: "仅在你完成飞书个人授权后可读取；不会自动读取所有文档。", keywords: ["读取飞书文档", "读飞书文档", "读取文档", "读文档", "文档阅读"] },
   { id: "write_feishu_docs", title: "创建或写入飞书文档", kind: "app_permission", scopes: ["docx:document:write_only"], purpose: "根据你确认的内容创建或更新飞书文档。", risk: "会产生或修改云端文档；每次写入前仍应由你确认。", keywords: ["写飞书文档", "创建飞书文档", "写入文档", "生成飞书文档", "修改文档"] },
@@ -1568,6 +1661,18 @@ function cardOperatorId(eventBody) {
 function skillRequestToast(type, content) { return { toast: { type, content } }; }
 function handleFeishuCardAction(eventBody) {
   const db = readDb(); const value = cardActionValue(eventBody);
+  if (value.source === "tona_document_delivery" && value.requestId) {
+    const request = documentRequestEntries(db).find((item) => item.id === value.requestId);
+    if (!request) return skillRequestToast("warning", "\u8be5\u6587\u6863\u4ea4\u4ed8\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002");
+    const operatorId = cardOperatorId(eventBody);
+    if (request.requestedBy && operatorId && request.requestedBy !== operatorId) return skillRequestToast("warning", "\u53ea\u6709\u53d1\u8d77\u8be5\u8bf7\u6c42\u7684\u7528\u6237\u53ef\u4ee5\u786e\u8ba4\u3002");
+    if (request.status !== "pending") return skillRequestToast("info", "\u8be5\u6587\u6863\u8bf7\u6c42\u5df2\u5904\u7406\uff1a" + request.status + "\u3002");
+    request.approvedBy = operatorId || request.requestedBy || ""; request.updatedAt = new Date().toISOString();
+    if (value.action === "reject") { request.status = "rejected"; writeDb(db); return skillRequestToast("info", "\u5df2\u53d6\u6d88\uff0c\u672c\u6b21\u4e0d\u4f1a\u521b\u5efa\u98de\u4e66\u6587\u6863\u3002"); }
+    request.status = "approved"; writeDb(db);
+    scheduleDocumentDelivery(activeWorkspaceId() || "usr_owner", request.id);
+    return skillRequestToast("success", "\u5df2\u5f00\u59cb\u751f\u6210\u6587\u6863\uff0c\u5b8c\u6210\u540e\u4f1a\u5728\u5f53\u524d\u4f1a\u8bdd\u56de\u4f20\u94fe\u63a5\u3002");
+  }
   if (value.source !== "tona_skill_request" || !value.requestId) return skillRequestToast("warning", "这不是 TONA 的能力申请卡片。");
   const request = skillRequestEntries(db).find((item) => item.id === value.requestId);
   if (!request) return skillRequestToast("warning", "该申请已过期或不属于当前工作区。");
@@ -1613,6 +1718,11 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, capabilityCard(request));
       return;
     }
+    if (wantsFeishuDocumentDelivery(message.text)) {
+      const request = createDocumentDeliveryRequest(db, message, bot);
+      await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, documentDeliveryCard(request));
+      return;
+    }
     const decisionMakerAllowed = !policy.decisionMakerOpenIds.length || policy.decisionMakerOpenIds.includes(message.senderId);
     const plan = message.chatType === "group" && groupMessageRequestsCollaboration(db, message, bot) ? collaborationPlanFromMessage(db, message, bot) : null;
     const canStart = message.chatType === "group" && policy.enabled && decisionMakerAllowed && Boolean(plan) && !collaborationTaskAlreadyStarted(db, message.messageId);
@@ -1638,6 +1748,11 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
   try {
     const groupContext = groupKnowledgeContext(db, message);
     let promptText = message.text;
+    if (!task && wantsFeishuDocumentRead(message.text)) {
+      const documentId = extractFeishuDocumentId(message.text);
+      const documentText = await readFeishuDocument(larkBotToAppSettings(bot), documentId);
+      promptText = "User explicitly asked to read this Feishu document. Answer in Chinese and cite uncertainty if the document is incomplete.\n\nDocument content:\n" + documentText + "\n\nUser request:\n" + message.text;
+    }
     if (task) {
       const prior = task.contributions.map((item) => item.agentName + ": " + item.content).join("\n\n");
       const nextLabel = task.nextAgentId ? collaborationAgentName(db, task.nextAgentId) : "none; close with a concise decision-ready summary";
@@ -1725,7 +1840,9 @@ function larkAppDiagnosis(db, req) {
   const permissions = [
     { id: "im:message", name: "接收消息事件", why: "让机器人收到群里的 @ 消息。" },
     { id: "im:message:send_as_bot", name: "以机器人身份发送消息", why: "让机器人回复群消息。" },
-    { id: "im:chat", name: "读取群聊基础信息", why: "用于判断消息来自哪个群。" }
+    { id: "im:chat", name: "读取群聊基础信息", why: "用于判断消息来自哪个群。" },
+    { id: "docx:document:readonly", name: "\u8bfb\u53d6\u6307\u5b9a\u98de\u4e66\u6587\u6863", why: "\u8ba9\u673a\u5668\u4eba\u53ea\u8bfb\u53d6\u7528\u6237\u5728\u6d88\u606f\u4e2d\u660e\u786e\u63d0\u4f9b\u94fe\u63a5\u6216\u6587\u6863 ID \u7684\u5185\u5bb9\u3002" },
+    { id: "docx:document:write_only", name: "\u521b\u5efa\u548c\u5199\u5165\u98de\u4e66\u6587\u6863", why: "\u8ba9\u5361\u7247\u786e\u8ba4\u540e\u7684\u4ea4\u4ed8\u81ea\u52a8\u521b\u5efa\u65b0\u6587\u6863\u5e76\u5199\u5165\u5185\u5bb9\u3002" }
   ];
   const steps = [
     "在飞书开放平台创建企业自建应用，并启用机器人能力。",
@@ -1733,7 +1850,8 @@ function larkAppDiagnosis(db, req) {
     "在事件订阅里填写公网回调 URL。localhost 只能本机访问，飞书后台不能访问。",
     "把 Verification Token 和 Encrypt Key 填回本页。",
     "订阅消息事件，例如接收群聊消息 / 机器人被 @。",
-    "申请并开通消息发送权限，然后安装应用到你的个人飞书群。"
+    "申请并开通消息发送权限，然后安装应用到你的个人飞书群。",
+    "\u8981\u542f\u7528\u6587\u6863\u5de5\u5177\uff0c\u8bf7\u989d\u5916\u5f00\u901a docx:document:readonly \u548c docx:document:write_only\uff1b\u5728\u4e8b\u4ef6\u8ba2\u9605\u4e2d\u4fdd\u7559 card.action.trigger\uff0c\u4f7f\u5361\u7247\u786e\u8ba4\u53ef\u4ee5\u56de\u4f20\u7ed9 TONA\u3002"
   ];
   return {
     appConfigured: Boolean(settings.larkAppId && settings.larkAppSecret),
