@@ -1892,7 +1892,7 @@ async function handleFeishuEvent(req, res, receivedBody = null) {
       }
       return sendJson(res, 200, { challenge: eventBody.challenge });
     }
-    if (!decryptError && (eventBody.header?.event_type || eventBody.event_type) === "card.action.trigger") {
+    if (!decryptError && /^card\.action\.trigger(?:_v1)?$/.test(eventBody.header?.event_type || eventBody.event_type || "")) {
       return sendJson(res, 200, handleFeishuCardAction(eventBody));
     }
     const eventLogDir = larkEventLogDir();

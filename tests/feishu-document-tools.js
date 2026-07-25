@@ -67,7 +67,7 @@ function messageEvent(messageId, text) {
     const publicState = await request('/api/state');
     if (publicState.settings.documentRequests !== undefined) throw new Error('Document request ledger was exposed in public state');
 
-    const callback = await request('/feishu/events/usr_owner', { method: 'POST', body: JSON.stringify({ header: { event_type: 'card.action.trigger', app_id: 'cli_doc_tools' }, event: { operator: { open_id: 'ou_requester' }, action: { value: confirm.value } } }) });
+    const callback = await request('/feishu/events/usr_owner', { method: 'POST', body: JSON.stringify({ header: { event_type: 'card.action.trigger_v1', app_id: 'cli_doc_tools' }, event: { operator: { open_id: 'ou_requester' }, action: { value: confirm.value } } }) });
     if (callback.toast?.type !== 'success') throw new Error('Document approval callback was not accepted');
     await waitFor(() => (storedDb().settings.documentRequests || []).some((item) => item.id === confirm.value.requestId && ['completed', 'failed'].includes(item.status)), 'document delivery');
     const deliveredRequest = (storedDb().settings.documentRequests || []).find((item) => item.id === confirm.value.requestId);
