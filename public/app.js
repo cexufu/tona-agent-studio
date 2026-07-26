@@ -457,6 +457,8 @@ function renderWorkflows() {
       <div class="pill-row">
         <span class="pill">${workflow.steps.length} steps</span>
         <span class="pill">${escapeHtml(workflow.inputType)}</span>
+        <span class="pill">${workflow.builtIn ? "\u5185\u7f6e\u6a21\u677f" : "\u81ea\u5b9a\u4e49"}</span>
+        ${workflow.system ? `<span class="pill">\u7cfb\u7edf\u80fd\u529b</span>` : ""}
       </div>
     </div>
   `).join("");
@@ -492,6 +494,10 @@ function textToWorkflowSteps(text) {
 
 function renderWorkflowForm() {
   const workflow = state.db.workflows.find((item) => item.id === state.selectedWorkflowId) || {};
+  const testMeta = $("#skillTestMeta");
+  const testResult = $("#skillTestResult");
+  if (testMeta) testMeta.textContent = "";
+  if (testResult) testResult.innerHTML = "";
   setForm($("#workflowForm"), {
     ...workflow,
     triggerExamples: (workflow.triggerExamples || []).join("\n"),
@@ -539,6 +545,8 @@ async function deleteSelectedAgent() {
   }
 }
 
+async function createSkillDraft() { const request=window.prompt('\u7528\u4e00\u53e5\u8bdd\u8bf4\u660e\u4f60\u60f3\u91cd\u590d\u4f7f\u7528\u7684\u5de5\u4f5c\u6d41\u7a0b\u3002'); if(!request?.trim())return; const button=document.querySelector('#createSkillDraftButton');button.disabled=true;try{const result=await api('/api/skills/draft',{method:'POST',body:JSON.stringify({request})});state.selectedWorkflowId=null;setForm(document.querySelector('#workflowForm'),{...result.skill,triggerExamples:(result.skill.triggerExamples||[]).join('\\n'),steps:workflowStepsToText(result.skill),enabled:'true'});document.querySelector('#skillTestInput').value=request;toast('\u5df2\u751f\u6210 Skill \u8349\u6848\uff0c\u4fee\u6539\u540e\u4fdd\u5b58\u5373\u53ef\u3002');}catch(error){toast(error.message);}finally{button.disabled=false;} }
+async function testSkill() { const skillId=document.querySelector('#workflowForm').elements.id.value||state.selectedWorkflowId;const input=document.querySelector('#skillTestInput').value.trim();if(!skillId)return toast('\u8bf7\u5148\u4fdd\u5b58\u8fd9\u4e2a Skill\uff0c\u518d\u6d4b\u8bd5\u3002');if(!input)return toast('\u8bf7\u8f93\u5165\u6d4b\u8bd5\u6750\u6599\u3002');const button=document.querySelector('#testSkillButton'),meta=document.querySelector('#skillTestMeta'),box=document.querySelector('#skillTestResult');button.disabled=true;meta.textContent='\u6b63\u5728 Studio \u6c99\u76d2\u8fd0\u884c\uff0c\u4e0d\u4f1a\u53d1\u9001\u98de\u4e66\u6d88\u606f\u2026';box.innerHTML='';try{const run=await api('/api/skills/test',{method:'POST',body:JSON.stringify({skillId,input})});meta.textContent='\u6d4b\u8bd5\u5b8c\u6210\uff1a'+run.status+' / '+(run.steps||[]).length+' \u6b65';box.innerHTML='<pre>'+escapeHtml(run.finalOutput||'\u6ca1\u6709\u4ea7\u51fa\u5185\u5bb9\u3002')+'</pre>';}catch(error){meta.textContent=error.message;toast(error.message);}finally{button.disabled=false;} }
 async function saveWorkflow(event) {
   event.preventDefault();
   const data = formData(event.currentTarget);
@@ -751,6 +759,8 @@ function bindEvents() {
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);
   bindIfPresent("#workflowForm", "submit", saveWorkflow);
   bindIfPresent("#deleteWorkflowButton", "click", deleteSelectedWorkflow);
+  bindIfPresent("#createSkillDraftButton", "click", createSkillDraft);
+  bindIfPresent("#testSkillButton", "click", testSkill);
   bindIfPresent("#larkForm", "submit", saveLarkSettings);
   bindIfPresent("#larkAppForm", "submit", saveLarkAppSettings);
   bindIfPresent("#larkBotForm", "submit", saveLarkBot);

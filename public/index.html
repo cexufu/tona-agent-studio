@@ -228,6 +228,7 @@
               <h2>Skill Center</h2>
               <p class="page-subtitle">把可重复调用的专业能力集中管理。每个 Skill 包含触发场景、输入类型和多角色执行步骤。</p>
             </div>
+            <button id="createSkillDraftButton">AI &#29983;&#25104; Skill</button>
             <button class="primary" id="newWorkflowButton">新增 Skill</button>
           </div>
           <section class="howto"><strong>怎么创建 Skill：</strong><span>1. 写清楚用户会怎么提出需求。</span><span>2. 每行按“角色ID | 任务”编排执行步骤。</span><span>3. 保存后可在工作台选择并运行。</span></section>
@@ -251,6 +252,9 @@
                 <label class="span-2">触发示例，每行一句<textarea name="triggerExamples" placeholder="帮我把这份材料整理成研究简报"></textarea></label>
                 <label class="span-2">步骤，每行一个：agentId | task<textarea name="steps" class="steps-textarea"></textarea></label>
                 <button class="primary span-2" type="submit">保存 Skill</button>
+                <label class="span-2">&#27979;&#35797;&#36755;&#20837;<textarea id="skillTestInput" placeholder="&#36755;&#20837;&#19968;&#27573;&#27169;&#25311;&#26448;&#26009;&#65307;&#27979;&#35797;&#21482;&#22312; Studio &#20869;&#36816;&#34892;&#65292;&#19981;&#20250;&#21457;&#36865;&#39134;&#20070;&#28040;&#24687;&#12290;"></textarea></label>
+                <div class="inline-actions span-2"><button id="testSkillButton" type="button">&#22312; Studio &#27979;&#35797;</button><span id="skillTestMeta" class="meta"></span></div>
+                <div id="skillTestResult" class="skill-test-result span-2"></div>
               </form>
             </section>
           </div>

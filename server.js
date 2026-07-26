@@ -252,6 +252,8 @@ const PERSONAL_AGENT_TEMPLATES = [
   }
 ];
 
+const BUILT_IN_SKILLS = [["skill_creator","\u6280\u80fd\u521b\u5efa\u5668","\u628a\u4e00\u53e5\u5de5\u4f5c\u9700\u6c42\u53d8\u6210\u53ef\u7f16\u8f91\u7684 Skill \u8349\u6848\u3002",1,"daily_assistant","Clarify the intended reusable workflow and return a concise Skill specification."],["skill_test","\u6280\u80fd\u6d4b\u8bd5","\u7528\u6a21\u62df\u8f93\u5165\u8bd5\u8dd1 Skill\uff0c\u68c0\u67e5\u8f93\u51fa\u3001\u6a21\u578b\u548c\u6b65\u9aa4\u95ee\u9898\u3002",1,"coding_assistant","Review the workflow for missing inputs, unsafe actions, unclear handoffs, and concrete test cases."],["feishu_learning","\u98de\u4e66\u8d44\u6599\u5b66\u4e60","\u57fa\u4e8e\u7528\u6237\u660e\u786e\u63d0\u4f9b\u7684\u98de\u4e66\u6587\u6863\u6216\u7fa4\u804a\u6750\u6599\u6574\u7406\u77e5\u8bc6\u4e0e\u53ef\u6267\u884c\u7ed3\u8bba\u3002",0,"research_assistant","Read only user-provided Feishu material. Extract facts, decisions, evidence boundaries, and a reusable knowledge brief."],["research_brief","\u7814\u7a76\u7b80\u62a5","\u628a\u8bba\u6587\u3001\u79d1\u7814\u65b0\u95fb\u6216\u9879\u76ee\u901a\u77e5\u53d8\u6210\u53ef\u884c\u52a8\u7684\u7814\u7a76\u7b80\u62a5\u3002",0,"research_assistant","Extract research question, method, contribution, evidence limits, and relevance."],["meeting_assistant","\u4f1a\u8bae\u52a9\u7406","\u751f\u6210\u4f1a\u524d\u8bae\u7a0b\u3001\u4f1a\u4e2d\u8bb0\u5f55\u6846\u67b6\u548c\u4f1a\u540e\u5f85\u529e\u3002",0,"daily_assistant","Create a focused agenda, decisions to make, note-taking structure, and post-meeting actions."],["daily_report","\u65e5\u62a5\u4e0e\u5468\u62a5","\u628a\u5de5\u4f5c\u4e8b\u9879\u3001\u8fdb\u5c55\u548c\u98ce\u9669\u6574\u7406\u6210\u62a5\u544a\u3002",0,"daily_assistant","Organize progress, blockers, risks, next priorities, and support requests. Do not invent progress."],["copywriting_designer","\u6587\u6848\u8bbe\u8ba1","\u4e3a\u5c0f\u7ea2\u4e66\u3001\u516c\u4f17\u53f7\u6216\u8bb2\u7a3f\u751f\u6210\u9009\u9898\u3001\u7ed3\u6784\u548c\u521d\u7a3f\u3002",0,"research_assistant","Extract credible audience-relevant insights and evidence boundaries."],["document_review","\u6587\u6863\u5ba1\u9605","\u5ba1\u9605\u6587\u672c\u6216\u98de\u4e66\u6587\u6863\u6458\u5f55\uff0c\u8f93\u51fa\u5177\u4f53\u4fee\u6539\u5efa\u8bae\u3002",0,"research_assistant","Review claims, evidence, structure, missing information, and risks. Separate facts from suggestions."],["multi_agent_review","\u591a\u89d2\u8272\u8bc4\u5ba1","\u7528\u7814\u7a76\u3001\u6267\u884c\u548c\u7edf\u7b79\u89d2\u8272\u8bc4\u5ba1\u65b9\u6848\uff0c\u6536\u655b\u4e3a\u51b3\u7b56\u5efa\u8bae\u3002",0,"research_assistant","Evaluate evidence, novelty, assumptions, and research risks, then give a decision-ready recommendation."]].map(([id,name,description,system,agentId,task])=>({id,name,description,system:Boolean(system),triggerExamples:[name],inputType:'text',steps:[{agentId,task}],enabled:true,outputMode:'markdown',builtIn:true}));
+function syncBuiltInSkills(db){db.workflows=Array.isArray(db.workflows)?db.workflows:[];let changed=false;for(const template of BUILT_IN_SKILLS){if(!db.workflows.some((skill)=>skill.id===template.id)){db.workflows.push(JSON.parse(JSON.stringify(template)));changed=true;}}return changed;}
 const CUSTOMER_DEFAULT_AGENT_IDS = new Set(["daily_assistant", "research_assistant", "coding_assistant"]);
 function createInitialDb() {
   const db = JSON.parse(JSON.stringify(DEFAULT_DB));
@@ -265,6 +267,7 @@ function createInitialDb() {
     db.agents = [...PERSONAL_AGENT_TEMPLATES, ...db.agents.filter((agent) => !existingIds.has(agent.id))];
   }
   db.settings = { ...db.settings, defaultProviderId: "deepseek", botConversationMaxRounds: 10, larkBots: [], collaborationPolicy: defaultCollaborationPolicy(db.agents), collaborationTasks: [], assistantTasks: [] };
+  syncBuiltInSkills(db);
   return db;
 }
 
@@ -354,7 +357,8 @@ function readDb() {
   const db = transformSecrets(JSON.parse(fs.readFileSync(storagePaths().dbPath, "utf8")), decryptSecretAtRest);
   const deepSeekMigrated = migrateRetiredDeepSeekModels(db);
   const kimiMigrated = migrateRetiredKimiModels(db);
-  if (deepSeekMigrated || kimiMigrated) writeDb(db);
+  const builtInSkillMigrated = syncBuiltInSkills(db);
+  if (deepSeekMigrated || kimiMigrated || builtInSkillMigrated) writeDb(db);
   return db;
 }
 function writeDb(db) {
@@ -502,14 +506,14 @@ function collaborationTaskSequence(plan) {
 function startsCollaborationTask(text) { return /\u534f\u4f5c|\u534f\u540c|\u591a\u673a\u5668\u4eba|\u591aAI|multi[ -]?agent/i.test(String(text || "")); }
 
 function collaborationDirectiveValue(text, labels) {
-  const pattern = new RegExp("(?:^|[\\n\\u3002\\uff1b;]|(?:\\u534f\\u4f5c(?:\\u4efb\\u52a1)?|\\u534f\\u540c)\\s*[:\\uff1a])\\s*(?:" + labels + ")\\s*[:\\uff1a]\\s*([^\\n\\u3002\\uff1b;]+)", "i");
+  const pattern = new RegExp("(?:^|[\\n\u3002\uff1b;]|(?:\u534f\u4f5c(?:\u4efb\u52a1)?|\u534f\u540c)\\s*[:\uff1a])\\s*(?:" + labels + ")\\s*[:\uff1a]\\s*([^\\n\u3002\uff1b;]+)", "i");
   const match = String(text || "").match(pattern);
   return match ? match[1].trim() : "";
 }
 
 function collaborationAgentIdsFromText(db, value) {
   const agents = db.agents || [];
-  const tokens = String(value || "").split(new RegExp("[,\\uFF0C\\u3001/]" )).map((item) => item.trim()).filter(Boolean);
+  const tokens = String(value || "").split(new RegExp("[,\uFF0C\u3001/]" )).map((item) => item.trim()).filter(Boolean);
   const ids = [];
   for (const token of tokens) {
     const agent = agents.find((item) => item.id === token || item.name === token);
@@ -523,16 +527,16 @@ function collaborationAgentIdFromText(db, value) { return collaborationAgentIdsF
 
 function collaborationPlanFromMessage(db, message, bot) {
   const taskText = String(message.text || "");
-  const coordinatorLabel = collaborationDirectiveValue(taskText, "\\u534f\\u8c03|\\u4e3b\\u5bfc");
+  const coordinatorLabel = collaborationDirectiveValue(taskText, "\u534f\u8c03|\u4e3b\u5bfc");
   const requestedCoordinator = collaborationAgentIdFromText(db, coordinatorLabel);
   if (requestedCoordinator && requestedCoordinator !== bot.agentId) return null;
-  const participantLabel = collaborationDirectiveValue(taskText, "\\u53c2\\u4e0e|\\u89d2\\u8272|\\u6210\\u5458");
+  const participantLabel = collaborationDirectiveValue(taskText, "\u53c2\u4e0e|\u89d2\u8272|\u6210\u5458");
   const mentioned = collaborationAgentIdsFromText(db, participantLabel || taskText);
   const participantAgentIds = [...new Set([bot.agentId, ...mentioned])].slice(0, COLLABORATION_MAX_PARTICIPANTS);
-  const writerLabel = collaborationDirectiveValue(taskText, "\\u6267\\u7b14|\\u4e3b\\u7b14|\\u6c47\\u603b|\\u7ed3\\u8bba");
+  const writerLabel = collaborationDirectiveValue(taskText, "\u6267\u7b14|\u4e3b\u7b14|\u6c47\u603b|\u7ed3\u8bba");
   const writerAgentId = collaborationAgentIdFromText(db, writerLabel) || participantAgentIds[participantAgentIds.length - 1] || bot.agentId;
   if (!participantAgentIds.includes(writerAgentId) && participantAgentIds.length < COLLABORATION_MAX_PARTICIPANTS) participantAgentIds.push(writerAgentId);
-  const roundsLabel = collaborationDirectiveValue(taskText, "\\u8f6e\\u6b21|\\u56de\\u5408|\\u8ba8\\u8bba\\u8f6e");
+  const roundsLabel = collaborationDirectiveValue(taskText, "\u8f6e\u6b21|\u56de\u5408|\u8ba8\u8bba\u8f6e");
   const parsedRounds = Number.parseInt(roundsLabel, 10);
   // No explicit round count keeps discussion lively without consuming the full safety budget by default.
   const rounds = Number.isFinite(parsedRounds) ? Math.min(COLLABORATION_MAX_MESSAGES, Math.max(1, parsedRounds)) : 3;
@@ -630,6 +634,8 @@ function normalizeSkill(input) {
   };
 }
 
+function fallbackSkillDraft(db, request){const ids=new Set((db.agents||[]).map((a)=>a.id));const primary=ids.has('daily_assistant')?'daily_assistant':db.agents[0]?.id||'';const specialist=ids.has('research_assistant')?'research_assistant':primary;const name=String(request||'').trim().slice(0,32)||'\u65b0\u5efa Skill';return normalizeSkill({id:'',name,description:'\u7531 AI \u751f\u6210\u7684\u53ef\u7f16\u8f91 Skill \u8349\u6848\u3002',inputType:'text',enabled:true,triggerExamples:[name],steps:[{agentId:specialist,task:'Analyze the input and extract task-relevant information.'},{agentId:primary,task:'Produce an executable conclusion, next step, and open questions.'}]});}
+async function createSkillDraft(db,request){const fallback=fallbackSkillDraft(db,request);const provider=firstReadyProvider(db),agent=db.agents.find((a)=>a.id==='daily_assistant')||db.agents[0];if(!provider||!agent)return fallback;try{const result=await callOpenAICompatible(provider,agent,[{role:'system',content:'You design reusable TONA Skills. Return strict JSON only with name, description, inputType, triggerExamples, steps. inputType must be text. Use only agent IDs: '+(db.agents||[]).map((a)=>a.id).join(', ')+'. Steps contains 1-4 objects with agentId and task. Do not include external actions, secrets, or automatic writes.'},{role:'user',content:'Create a practical Skill draft for: '+String(request||'').slice(0,1000)}]);const match=String(result.content||'').match(/\{[\s\S]*\}/);if(!match)return fallback;const parsed=JSON.parse(match[0]);const allowed=new Set((db.agents||[]).map((a)=>a.id));const steps=(parsed.steps||[]).filter((x)=>allowed.has(x.agentId)&&String(x.task||'').trim()).slice(0,4);return normalizeSkill({...fallback,...parsed,id:'',name:String(parsed.name||fallback.name).slice(0,60),description:String(parsed.description||fallback.description).slice(0,300),triggerExamples:Array.isArray(parsed.triggerExamples)?parsed.triggerExamples.slice(0,5):fallback.triggerExamples,steps:steps.length?steps:fallback.steps,enabled:true});}catch{return fallback;}}
 function deleteSkill(db, skillId) {
   const index = (db.workflows || []).findIndex((skill) => skill.id === skillId);
   if (index < 0) {
@@ -2111,6 +2117,8 @@ async function handleApiInWorkspace(req, res, pathname) {
     if (req.method === "GET" && pathname === "/api/skills") {
       return sendJson(res, 200, { skills: (readDb().workflows || []).map(normalizeSkill) });
     }
+    if (req.method === 'POST' && pathname === '/api/skills/draft') { const body=await readBody(req); const request=String(body.request||'').trim(); if(!request)throw new Error('Describe the skill you want to create.'); return sendJson(res,200,{skill:await createSkillDraft(readDb(),request)}); }
+    if (req.method === 'POST' && pathname === '/api/skills/test') { const body=await readBody(req); const skillId=String(body.skillId||'').trim(),input=String(body.input||'').trim(); if(!skillId||!input)throw new Error('Skill and test input are required.'); const run=await runWorkflow({skillId,input}); return sendJson(res,200,{...run,testOnly:true}); }
     if (req.method === "POST" && pathname === "/api/skills") {
       const body = normalizeSkill(await readBody(req));
       const db = readDb();

@@ -728,3 +728,5 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+.skill-test-result pre { margin: 0; max-height: 300px; overflow: auto; white-space: pre-wrap; line-height: 1.55; padding: 12px; background: #f8fafb; border: 1px solid var(--line); border-radius: 6px; }
