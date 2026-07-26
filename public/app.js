@@ -501,6 +501,7 @@ function renderWorkflowForm() {
   setForm($("#workflowForm"), {
     ...workflow,
     triggerExamples: (workflow.triggerExamples || []).join("\n"),
+    qualityChecklist: (workflow.qualityChecklist || []).join("\n"),
     enabled: String(workflow.enabled !== false),
     steps: workflowStepsToText(workflow)
   });
@@ -551,6 +552,7 @@ async function saveWorkflow(event) {
   event.preventDefault();
   const data = formData(event.currentTarget);
   data.steps = textToWorkflowSteps(data.steps);
+  data.qualityChecklist = String(data.qualityChecklist || "").split("\n").map((item) => item.trim()).filter(Boolean);
   data.triggerExamples = data.triggerExamples.split("\n").map((item) => item.trim()).filter(Boolean);
   data.enabled = data.enabled === "true";
   data.outputMode = "markdown";
