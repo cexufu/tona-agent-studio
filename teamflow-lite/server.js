@@ -280,8 +280,15 @@ async function api(req, res, pathname) {
   }
   if (pathname === '/api/hub') {
     const account = registry.users.find(item => item.id === user.id);
+    const researchOwnerEmail = clean(process.env.TONA_RESEARCH_OWNER_EMAIL).toLowerCase();
+    const researchEnabled = Boolean(researchOwnerEmail)
+      && clean(account?.email).toLowerCase() === researchOwnerEmail;
+    const researchStudio = researchEnabled ? {
+      enabled: true,
+      url: clean(process.env.TONA_RESEARCH_STUDIO_URL) || 'https://tona-research-studio.fucx9501.chatgpt.site'
+    } : { enabled: false };
     const teams = (account?.teamIds || []).map(teamId => { const team = loadTeamDb(teamId); return { id: teamId, name: team.settings.teamName || 'TeamFlow Team', active: teamId === user._teamId }; });
-    return json(res, 200, { user: publicUser(user), aiStudioUrl: process.env.AI_STUDIO_PUBLIC_URL || '/', teamflowUrl: process.env.APP_PUBLIC_URL || '/teamflow/', teams });
+    return json(res, 200, { user: publicUser(user), aiStudioUrl: process.env.AI_STUDIO_PUBLIC_URL || '/', teamflowUrl: process.env.APP_PUBLIC_URL || '/teamflow/', researchStudio, teams });
   }
   if (pathname === '/api/hub/team-access' && req.method === 'POST') {
     const body = await readBody(req); const supplied = clean(body.teamKey);

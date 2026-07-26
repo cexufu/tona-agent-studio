@@ -8,7 +8,7 @@
     "start:tona": "node server.js",
     "start:teamflow": "node teamflow-lite/server.js",
     "check": "node --check gateway.js && node --check server.js && npm --prefix teamflow-lite run check",
-    "test": "npm --prefix teamflow-lite test && node tests/secrets-encryption.js && node tests/lark-secret-preservation.js && node tests/kimi-model-migration.js && node tests/deepseek-model-migration.js && node tests/collaboration-policy.js && node tests/gateway-smoke.js && node tests/skill-request-cards.js && node tests/feishu-document-tools.js && node tests/calendar-planning.js && node tests/server-managed-collaboration.js && node tests/builtin-skills.js && node tests/studio-admin-features.js"
+    "test": "npm --prefix teamflow-lite test && node tests/secrets-encryption.js && node tests/lark-secret-preservation.js && node tests/kimi-model-migration.js && node tests/deepseek-model-migration.js && node tests/collaboration-policy.js && node tests/gateway-smoke.js && node tests/skill-request-cards.js && node tests/feishu-document-tools.js && node tests/calendar-planning.js && node tests/server-managed-collaboration.js && node tests/builtin-skills.js && node tests/studio-admin-features.js && node tests/research-hub-entry.js"
   },
   "engines": {
     "node": ">=18"

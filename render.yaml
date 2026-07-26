@@ -15,6 +15,10 @@ services:
         value: /var/data/teamflow
       - key: TEAMFLOW_INITIAL_ADMIN_PASSWORD
         sync: false
+      - key: TONA_RESEARCH_OWNER_EMAIL
+        value: admin@team.local
+      - key: TONA_RESEARCH_STUDIO_URL
+        value: https://tona-research-studio.fucx9501.chatgpt.site
       - key: REMINDER_TIMEZONE
         value: Asia/Shanghai
       - key: REMINDER_HOUR
