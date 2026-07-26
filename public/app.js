@@ -317,11 +317,12 @@ async function renderLarkAppDiagnosis() {
     const diagnosis = await api("/api/lark-app-diagnose");
     const permissionHtml = diagnosis.permissions.map((item) => '<li><strong>' + escapeHtml(item.name) + '</strong><span>' + escapeHtml(item.why) + '</span></li>').join('');
     const stepHtml = diagnosis.steps.map((step, index) => '<li>' + (index + 1) + '. ' + escapeHtml(step) + '</li>').join('');
+    const capabilityHtml = (diagnosis.capabilities || []).map((item) => '<li><strong>' + escapeHtml(item.group + ' · ' + item.title) + '</strong><span>' + escapeHtml(item.availability) + '</span><span>' + escapeHtml(item.purpose) + '</span><code>申请权限：' + escapeHtml(item.title) + '</code></li>').join('');
     box.innerHTML = [
       '<div class="copy-row"><label>本地回调 URL</label><code>' + escapeHtml(diagnosis.localCallbackUrl) + '</code><button data-copy="' + escapeHtml(diagnosis.localCallbackUrl) + '">复制</button></div>',
       '<div class="copy-row"><label>飞书后台应填写</label><code>' + escapeHtml(diagnosis.effectiveCallbackUrl) + '</code><button data-copy="' + escapeHtml(diagnosis.effectiveCallbackUrl) + '">复制</button></div>',
       '<div class="mode-note"><strong>关键提醒</strong><p>飞书后台不能访问 localhost。要做可 @ 的应用机器人，你需要公网 URL，比如 ngrok、Cloudflare Tunnel、Render/Railway 部署地址。</p></div>',
-      '<h4>建议权限</h4><ul>' + permissionHtml + '</ul><h4>安装步骤</h4><ol>' + stepHtml + '</ol>'
+      '<h4>建议权限</h4><ul>' + permissionHtml + '</ul><h4>飞书能力目录</h4><p class="meta">在飞书中 @ 机器人并发送“申请权限：能力名称”，即可收到对应授权卡。显示“待接入执行器”的能力会先完成权限申请，再进入功能开发。</p><ul class="capability-list">' + capabilityHtml + '</ul><h4>安装步骤</h4><ol>' + stepHtml + '</ol>'
     ].join('');
     box.querySelectorAll('[data-copy]').forEach((button) => {
       button.addEventListener('click', async () => {

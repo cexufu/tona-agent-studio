@@ -1700,11 +1700,18 @@ function scheduleDocumentDelivery(workspaceId, requestId) {
 }
 
 const FEISHU_CAPABILITY_REQUESTS = [
-  { id: "read_feishu_docs", title: "读取飞书文档", kind: "user_oauth", scopes: ["docx:document:readonly", "drive:drive.metadata:readonly"], purpose: "读取你明确授权的文档，用于总结、问答或研究分析。", risk: "仅在你完成飞书个人授权后可读取；不会自动读取所有文档。", keywords: ["读取飞书文档", "读飞书文档", "读取文档", "读文档", "文档阅读"] },
-  { id: "write_feishu_docs", title: "创建或写入飞书文档", kind: "app_permission", scopes: ["docx:document:write_only"], purpose: "根据你确认的内容创建或更新飞书文档。", risk: "会产生或修改云端文档；每次写入前仍应由你确认。", keywords: ["写飞书文档", "创建飞书文档", "写入文档", "生成飞书文档", "修改文档"] },
-  { id: "read_calendar", title: "读取飞书日历", kind: "user_oauth", scopes: ["calendar:calendar:readonly"], purpose: "读取你授权的日历，用于会议安排和日程建议。", risk: "仅使用你个人授权范围内的日历；不会自行创建会议。", keywords: ["读取日历", "读日历", "查看日程", "读取日程", "日历权限"] },
-  { id: "write_calendar", title: "创建或修改飞书日程", kind: "user_oauth", scopes: ["calendar:calendar"], purpose: "根据你的确认创建、调整或取消日程。", risk: "会影响日历安排；每次实际变更前必须再次确认。", keywords: ["创建日程", "写入日历", "修改日程", "安排会议", "日程权限"] },
-  { id: "group_knowledge", title: "读取群内未 @ 消息作为知识上下文", kind: "app_permission", scopes: ["im:message.group_msg"], purpose: "让机器人静默学习群内讨论，在被 @ 时结合上下文回答。", risk: "机器人会收到该群的用户消息，但未经 @ 不会主动回复。", keywords: ["读取群消息", "群消息权限", "群知识", "群上下文", "群聊知识"] }
+  { id: "read_feishu_docs", group: "文档与知识", title: "读取飞书文档", kind: "user_oauth", scopes: ["docx:document:readonly", "drive:drive.metadata:readonly"], availability: "已支持：读取用户明确提供的文档", purpose: "读取你明确授权的文档，用于总结、问答或研究分析。", risk: "只读取你明确提供且授权给机器人的资源；不会扫描全部文档。", keywords: ["读取飞书文档", "读飞书文档", "读取文档", "读文档", "文档阅读"] },
+  { id: "write_feishu_docs", group: "文档与知识", title: "创建或写入飞书文档", kind: "app_permission", scopes: ["docx:document:write_only"], availability: "已支持：确认后创建新文档", purpose: "根据你确认的内容创建或更新飞书文档。", risk: "会产生或修改云端文档；每次写入前仍由你确认。", keywords: ["写飞书文档", "创建飞书文档", "写入文档", "生成飞书文档", "修改文档"] },
+  { id: "wiki_knowledge", group: "文档与知识", title: "读取或维护飞书知识库", kind: "app_permission", scopes: ["wiki:wiki:readonly", "wiki:wiki", "docx:document:readonly"], availability: "待接入执行器：知识库节点读取与发布", purpose: "读取指定知识库内容，或将确认后的文档整理进知识库。", risk: "除 API 权限外，应用还必须被授予具体知识空间或节点权限。", keywords: ["知识库权限", "读取知识库", "飞书 wiki", "维护知识库", "写入知识库"] },
+  { id: "drive_files", group: "文档与知识", title: "管理飞书云空间文件", kind: "app_permission", scopes: ["drive:drive:readonly", "drive:drive"], availability: "待接入执行器：文件检索、归档与移动", purpose: "在指定目录内检索、整理或移动你授权的文件。", risk: "文件移动、共享和删除属于高影响操作，必须单次确认。", keywords: ["云空间权限", "管理文件", "飞书文件", "文件夹权限", "归档文件"] },
+  { id: "sheets_data", group: "数据与表格", title: "读取或写入飞书电子表格", kind: "app_permission", scopes: ["sheets:spreadsheet:readonly", "sheets:spreadsheet"], availability: "待接入执行器：表格读取与范围写入", purpose: "读取指定电子表格，或把确认后的分析结果写入指定单元格范围。", risk: "写入前展示目标表、范围和变更摘要；不覆盖未知数据。", keywords: ["电子表格权限", "飞书表格", "读取表格", "写入表格", "sheet 权限"] },
+  { id: "bitable_data", group: "数据与表格", title: "管理飞书多维表格", kind: "app_permission", scopes: ["飞书后台：查看、编辑和管理多维表格"], availability: "待接入执行器：记录、字段和视图操作", purpose: "查询、创建或更新指定多维表格中的记录与字段。", risk: "应用还需成为具体多维表格的所有者或协作者；批量写入必须确认。", keywords: ["多维表格权限", "飞书多维表格", "bitable", "写入多维表格", "读取多维表格"] },
+  { id: "read_calendar", group: "日程与任务", title: "读取飞书日历", kind: "user_oauth", scopes: ["calendar:calendar:readonly"], availability: "已支持：授权后的日程读取与建议", purpose: "读取你授权的日历，用于会议安排和日程建议。", risk: "只使用个人授权范围内的日历；不会自行创建会议。", keywords: ["读取日历", "读日历", "查看日程", "读取日程", "日历权限"] },
+  { id: "write_calendar", group: "日程与任务", title: "创建或修改飞书日程", kind: "user_oauth", scopes: ["calendar:calendar"], availability: "已支持：确认后的日程计划卡", purpose: "根据你的确认创建、调整或取消日程。", risk: "会影响日历安排；每次实际变更前必须再次确认。", keywords: ["创建日程", "写入日历", "修改日程", "安排会议", "日程权限"] },
+  { id: "task_management", group: "日程与任务", title: "管理飞书任务", kind: "app_permission", scopes: ["飞书后台：查看、创建、更新任务"], availability: "待接入执行器：任务创建、状态与负责人", purpose: "将会议结论或项目计划同步为飞书任务并跟踪状态。", risk: "创建、指派、关闭任务会影响他人工作，需展示变更摘要后确认。", keywords: ["任务权限", "创建任务", "飞书任务", "更新任务", "任务管理"] },
+  { id: "contacts_directory", group: "沟通与组织", title: "读取通讯录基础信息", kind: "app_permission", scopes: ["contact:user.base:readonly"], availability: "待接入执行器：成员解析与负责人匹配", purpose: "根据姓名或部门匹配已授权的成员，用于任务负责人和会议邀请建议。", risk: "只读取必要的基础资料，不暴露通讯录数据给无关群聊。", keywords: ["通讯录权限", "读取通讯录", "查找同事", "成员信息", "部门信息"] },
+  { id: "group_knowledge", group: "沟通与组织", title: "读取群内未 @ 消息作为知识上下文", kind: "app_permission", scopes: ["im:message.group_msg"], availability: "已支持：群知识沉淀，未 @ 时保持静默", purpose: "让机器人静默学习群内讨论，在被 @ 时结合上下文回答。", risk: "机器人会收到该群用户消息，但未被 @ 不会主动回复。", keywords: ["读取群消息", "群消息权限", "群知识", "群上下文", "群聊知识"] },
+  { id: "approval_assistant", group: "流程与治理", title: "读取或发起飞书审批", kind: "app_permission", scopes: ["飞书后台：访问审批应用"], availability: "待接入执行器：审批查询与草稿发起", purpose: "读取授权范围内的审批状态，或把确认后的信息填入审批草稿。", risk: "机器人不会替你最终提交审批；审批内容、抄送人和提交动作必须确认。", keywords: ["审批权限", "飞书审批", "发起审批", "读取审批", "审批流程"] }
 ];
 function skillRequestEntries(db) {
   db.settings ||= {};
@@ -1977,6 +1984,7 @@ function larkAppDiagnosis(db, req) {
     publicCallbackUrl,
     effectiveCallbackUrl: publicCallbackUrl || localCallbackUrl,
     permissions,
+    capabilities: FEISHU_CAPABILITY_REQUESTS.map(({ id, group, title, kind, scopes, availability, purpose, risk }) => ({ id, group, title, kind, scopes, availability, purpose, risk })),
     steps
   };
 }
