@@ -534,6 +534,26 @@ function collaborationAgentIdsFromText(db, value) {
   return agents.filter((item) => item.name && String(value || "").includes(item.name)).map((item) => item.id);
 }
 
+function collaborationAgentIdsFromMentions(db, message) {
+  const labels = (message?.mentionLabels || []).map(normalizeMentionLabel).filter(Boolean);
+  if (!labels.length) return [];
+  const agentById = new Map((db.agents || []).map((agent) => [agent.id, agent]));
+  const ids = [];
+  for (const bot of allLarkBots(db)) {
+    const agent = agentById.get(bot.agentId);
+    const aliases = [bot.name, bot.openId, bot.userId, agent?.name, agent?.id].map(normalizeMentionLabel).filter(Boolean);
+    if (aliases.some((alias) => labels.includes(alias)) && !ids.includes(bot.agentId)) ids.push(bot.agentId);
+  }
+  return ids;
+}
+
+function collaborationAgentIdsFromMessage(db, message) {
+  return [...new Set([
+    ...collaborationAgentIdsFromText(db, message?.text || ""),
+    ...collaborationAgentIdsFromMentions(db, message)
+  ])].slice(0, COLLABORATION_MAX_PARTICIPANTS);
+}
+
 function collaborationAgentIdFromText(db, value) { return collaborationAgentIdsFromText(db, value)[0] || ""; }
 
 function collaborationPlanFromMessage(db, message, bot) {
@@ -542,7 +562,11 @@ function collaborationPlanFromMessage(db, message, bot) {
   const requestedCoordinator = collaborationAgentIdFromText(db, coordinatorLabel);
   if (requestedCoordinator && requestedCoordinator !== bot.agentId) return null;
   const participantLabel = collaborationDirectiveValue(taskText, "\u53c2\u4e0e|\u89d2\u8272|\u6210\u5458");
-  const mentioned = collaborationAgentIdsFromText(db, participantLabel || taskText);
+  // Feishu strips visible @ text from message.text. Use structured mentions as the source of truth.
+  const mentioned = [...new Set([
+    ...collaborationAgentIdsFromText(db, participantLabel || taskText),
+    ...collaborationAgentIdsFromMessage(db, message)
+  ])];
   const participantAgentIds = [...new Set([bot.agentId, ...mentioned])].slice(0, COLLABORATION_MAX_PARTICIPANTS);
   const writerLabel = collaborationDirectiveValue(taskText, "\u6267\u7b14|\u4e3b\u7b14|\u6c47\u603b|\u7ed3\u8bba");
   const writerAgentId = collaborationAgentIdFromText(db, writerLabel) || participantAgentIds[participantAgentIds.length - 1] || bot.agentId;
@@ -1410,8 +1434,11 @@ function feishuPostContent(text, title = "") {
 }
 function groupMessageRequestsCollaboration(db, message, bot) {
   if (startsCollaborationTask(message.text)) return true;
-  const otherAgents = collaborationAgentIdsFromText(db, message.text).filter((agentId) => agentId !== bot.agentId);
-  return otherAgents.length > 0 && /(请|一起|帮我|帮忙|讨论|分析|评估|协同|协调|邀请|问问|看看)/.test(String(message.text || ""));
+  const mentionedAgents = collaborationAgentIdsFromMessage(db, message);
+  const otherAgents = mentionedAgents.filter((agentId) => agentId !== bot.agentId);
+  const asksForJointWork = /(请|一起|帮我|帮忙|讨论|分析|评估|协同|协调|邀请|问问|看看|会商|配合)/.test(String(message.text || ""));
+  // A human explicitly @-ing configured bots is an unambiguous collaboration request.
+  return asksForJointWork && (otherAgents.length > 0 || mentionedAgents.length > 1);
 }
 
 
@@ -1464,7 +1491,7 @@ function collaborationPrompt(task, message, db, agentId, groupContext) {
   const position = task.messageCount; const stage = collaborationStage(task, position);
   const agent = (db.agents || []).find((item) => item.id === agentId); const nextAgentId = task.nextAgentId || "";
   const nextName = nextAgentId ? collaborationAgentName(db, nextAgentId) : "the task requester";
-  const shared = ["This is a system-managed Feishu multi-agent collaboration. Reply in Chinese.", "Task id: " + task.id + ". Stage: " + stage.label + ". Contribution " + position + " of " + task.sequence.length + ".", "Your role: " + (agent?.name || agentId) + ". Role focus: " + (agent?.role || "professional analysis") + ".", "Working rule: advance the task. Make one clear claim, name its evidence or assumption, and either improve or challenge a prior claim. Never greet, repeat the task, pretend to browse, or claim tools/data you did not use.", "Stage instruction: " + stage.instruction, "Task: " + message.text, "Relevant group context: " + (groupContext || "none"), "Prior contributions: " + (prior || "none")];
+  const shared = ["This is a system-managed Feishu multi-agent collaboration. Reply in Chinese.", "Task id: " + task.id + ". Stage: " + stage.label + ". Contribution " + position + " of " + task.sequence.length + ".", "Your role: " + (agent?.name || agentId) + ". Role focus: " + (agent?.role || "professional analysis") + ".", "Working rule: advance the task. Make one clear claim, name its evidence or assumption, and either improve or challenge a prior claim. Never greet, repeat the task, pretend to browse, or claim tools/data you did not use. The platform adds a native Feishu @ tag for the next role, so write a concrete handoff question but do not imitate an @ mention yourself.", "Stage instruction: " + stage.instruction, "Task: " + message.text, "Relevant group context: " + (groupContext || "none"), "Prior contributions: " + (prior || "none")];
   if (stage.id === "deliver") shared.push("Before finalizing, verify: " + (task.quality?.checks || []).join("; ") + ". Use exactly these concise sections: \u3010\u7ed3\u8bba\u3011, \u3010\u884c\u52a8\u8ba1\u5212\u3011, \u3010\u98ce\u9669\u4e0e\u5f85\u786e\u8ba4\u3011, \u3010\u8bf7\u7528\u6237\u786e\u8ba4\u3011. The final line must explicitly invite @" + nextName + " to decide the next step.");
   else shared.push("Use exactly these concise sections: \u3010\u672c\u8f6e\u5224\u65ad\u3011, \u3010\u4f9d\u636e\u6216\u5047\u8bbe\u3011, \u3010\u98ce\u9669/\u5206\u6b67\u3011, \u3010\u4ea4\u7ed9\u4e0b\u4e00\u4f4d\u3011. The last section must state the single question or decision for @" + nextName + ".");
   return shared.join("\n\n");

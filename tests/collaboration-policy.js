@@ -100,7 +100,20 @@ async function ready() {
     await new Promise((resolve) => setTimeout(resolve, 80));
     stored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
     if (!(stored.settings.collaborationTasks || []).some((item) => item.sourceMessageId === 'message_named_colleagues')) throw new Error('Named colleague request did not start a controlled collaboration');
-    console.log('Collaboration policy test passed: five-role cap, ten-message cap, private task ledger, natural named-colleague requests, Feishu task directives, open discussion defaults, exact open-id mention routing, and silent group knowledge capture');
+    await request('/feishu/events/usr_owner', { method: 'POST', body: JSON.stringify({
+      header: { event_type: 'im.message.receive_v1', app_id: 'cli_test_coordinator' },
+      event: { sender: { sender_type: 'user', sender_id: { open_id: 'ou_test_one' } }, message: {
+        message_id: 'message_bot_display_mentions', chat_id: 'chat_dynamic_plan', chat_type: 'group', message_type: 'text',
+        mentions: [{ name: 'test coordinator', id: { open_id: 'ou_test_coordinator' } }, { name: 'test bystander', id: { open_id: 'ou_test_bystander' } }],
+        content: JSON.stringify({ text: '@_user_1 @_user_2 请你们两个讨论这个项目的研究设计' })
+      } }
+    }) });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    stored = await readJsonEventually(path.join(dataDir, 'workspaces', 'usr_owner', 'studio.json'));
+    const mentionedBotTask = (stored.settings.collaborationTasks || []).find((item) => item.sourceMessageId === 'message_bot_display_mentions');
+    if (!mentionedBotTask) throw new Error('Two bot display-name mentions did not start collaboration');
+    if (!mentionedBotTask.participantAgentIds.includes(selectedIds[0]) || !mentionedBotTask.participantAgentIds.includes(selectedIds[1])) throw new Error('Bot display-name mentions were not mapped to TONA roles');
+    console.log('Collaboration policy test passed: five-role cap, ten-message cap, private task ledger, natural named-colleague requests, Feishu task directives, open discussion defaults, native bot mention routing, exact open-id mention routing, and silent group knowledge capture');
   } finally {
     child.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
