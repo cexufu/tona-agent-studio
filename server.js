@@ -4,6 +4,16 @@ const path = require("path");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { AsyncLocalStorage } = require("async_hooks");
+const {
+  TOOL_CATALOG,
+  normalizeRuntimeSettings,
+  publicRuntimeSettings,
+  executeTool
+} = require("./runtime/tool-runtime");
+const {
+  runtimeUsageSummary,
+  prepareRuntimeResearch
+} = require("./runtime/server-support");
 
 const PORT = Number(process.env.PORT || 7357);
 const ROOT = __dirname;
@@ -277,7 +287,16 @@ function createInitialDb() {
     const existingIds = new Set(PERSONAL_AGENT_TEMPLATES.map((agent) => agent.id));
     db.agents = [...PERSONAL_AGENT_TEMPLATES, ...db.agents.filter((agent) => !existingIds.has(agent.id))];
   }
-  db.settings = { ...db.settings, defaultProviderId: "deepseek", botConversationMaxRounds: 10, larkBots: [], collaborationPolicy: defaultCollaborationPolicy(db.agents), collaborationTasks: [], assistantTasks: [] };
+  db.settings = {
+    ...db.settings,
+    defaultProviderId: "deepseek",
+    botConversationMaxRounds: 10,
+    larkBots: [],
+    runtime: normalizeRuntimeSettings(db.settings?.runtime),
+    collaborationPolicy: defaultCollaborationPolicy(db.agents),
+    collaborationTasks: [],
+    assistantTasks: []
+  };
   syncBuiltInSkills(db);
   return db;
 }
@@ -289,9 +308,19 @@ function activeWorkspaceId() {
 
 function storagePaths() {
   const workspaceId = activeWorkspaceId();
-  if (!workspaceId) return { dbPath: ROOT_DB_PATH, runsDir: ROOT_RUNS_DIR, usagePath: path.join(DATA_DIR, "model-usage.jsonl") };
+  if (!workspaceId) return {
+    dbPath: ROOT_DB_PATH,
+    runsDir: ROOT_RUNS_DIR,
+    usagePath: path.join(DATA_DIR, "model-usage.jsonl"),
+    toolUsagePath: path.join(DATA_DIR, "tool-usage.jsonl")
+  };
   const directory = path.join(WORKSPACES_DIR, workspaceId);
-  return { dbPath: path.join(directory, "studio.json"), runsDir: path.join(directory, "runs"), usagePath: path.join(directory, "model-usage.jsonl") };
+  return {
+    dbPath: path.join(directory, "studio.json"),
+    runsDir: path.join(directory, "runs"),
+    usagePath: path.join(directory, "model-usage.jsonl"),
+    toolUsagePath: path.join(directory, "tool-usage.jsonl")
+  };
 }
 
 function ensureStore() {
@@ -382,7 +411,7 @@ function writeDb(db) {
 
 function publicDb(db) {
   const settings = db.settings || {};
-  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, assistantTasks, ...safeSettings } = settings;
+  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, assistantTasks, runtime, ...safeSettings } = settings;
   return {
     ...db,
     providers: db.providers.map((provider) => ({
@@ -391,6 +420,7 @@ function publicDb(db) {
     })),
     settings: {
       ...safeSettings,
+      runtime: publicRuntimeSettings(runtime, maskSecret),
       collaborationPolicy: normalizeCollaborationPolicy(settings.collaborationPolicy, db.agents),
       larkWebhookSecret: settings.larkWebhookSecret ? maskSecret(settings.larkWebhookSecret) : "",
       larkAppSecret: settings.larkAppSecret ? maskSecret(settings.larkAppSecret) : "",
@@ -935,6 +965,18 @@ async function runWorkflow(body) {
   if (workflow.enabled === false) throw new Error("This skill is disabled.");
   const sourceInput = String(body.input || "").trim();
   if (!sourceInput) throw new Error("Input text is required.");
+  const runtimeResearch = await prepareRuntimeResearch({
+    settings: db.settings?.runtime,
+    text: sourceInput,
+    usagePath: storagePaths().toolUsagePath,
+    workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID,
+    feature: "studio_workflow"
+  });
+  const runtimeSourceInput = runtimeResearch?.ok
+    ? sourceInput + "\n\n" + runtimeResearch.evidence
+    : runtimeResearch?.requested
+      ? sourceInput + "\n\n[TONA Runtime notice: live web access was requested but unavailable: " + runtimeResearch.error + "]"
+      : sourceInput;
 
   const startedAt = new Date();
   const previousOutputs = [];
@@ -964,7 +1006,7 @@ async function runWorkflow(body) {
       } else {
         const result = await callOpenAICompatible(provider, agent, [
           { role: "system", content: agentSystemPrompt(agent) },
-          { role: "user", content: buildStepPrompt({ workflow, step, sourceInput, previousOutputs }) }
+          { role: "user", content: buildStepPrompt({ workflow, step, sourceInput: runtimeSourceInput, previousOutputs }) }
         ]);
         content = result.content;
         model = result.model;
@@ -994,7 +1036,10 @@ async function runWorkflow(body) {
     previousOutputs.push({ agentName: agent.name, content });
   }
 
-  const finalOutput = previousOutputs.at(-1)?.content || "";
+  let finalOutput = previousOutputs.at(-1)?.content || "";
+  if (runtimeResearch?.ok && runtimeResearch.appendix && !runtimeResearch.sources.some((source) => finalOutput.includes(source.url))) {
+    finalOutput += runtimeResearch.appendix;
+  }
   const runId = `${startedAt.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}_${workflow.id}_${crypto.randomUUID().slice(0, 8)}`;
   const run = {
     id: runId,
@@ -1008,6 +1053,14 @@ async function runWorkflow(body) {
     input: db.settings.saveInputs ? sourceInput : null,
     steps: stepResults,
     finalOutput,
+    runtime: runtimeResearch ? {
+      requested: runtimeResearch.requested,
+      ok: runtimeResearch.ok,
+      tool: runtimeResearch.tool,
+      provider: runtimeResearch.provider || "",
+      sourceCount: runtimeResearch.sources?.length || 0,
+      error: runtimeResearch.error || ""
+    } : null,
     errors
   };
   fs.writeFileSync(path.join(storagePaths().runsDir, `${runId}.json`), JSON.stringify(run, null, 2));
@@ -1169,16 +1222,31 @@ function decryptFeishuPayloadForAnyBot(encrypt, db) {
   throw lastError || new Error("Failed to decrypt Feishu event with configured bot keys.");
 }
 
-async function runAgentReply(db, agentId, text) {
+async function runAgentReply(db, agentId, text, options = {}) {
   const agent = db.agents.find((item) => item.id === agentId) || db.agents.find((item) => item.id === "daily_assistant") || db.agents[0];
   if (!agent) return "我还没有配置角色。请先在 TONA 的“角色”页创建一个角色。";
   const provider = db.providers.find((item) => item.id === agent.providerId) || firstReadyProvider(db);
   if (!provider || !provider.enabled || !provider.apiKey) return "我在，但这个角色还没有可用模型。请先在 TONA 的“模型”页启用一个模型，并在“角色”页绑定给我。";
+  const runtimeResearch = options.enableTools ? await prepareRuntimeResearch({
+    settings: db.settings?.runtime,
+    text,
+    usagePath: storagePaths().toolUsagePath,
+    workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID,
+    feature: options.feature || "agent_reply"
+  }) : null;
+  if (runtimeResearch?.requested && !runtimeResearch.ok) {
+    return "我收到了联网请求，但当前搜索工具还不能工作：" + runtimeResearch.error + "。请在 AI Studio 的“工具”页面配置搜索 API Key。";
+  }
+  const runtimeText = runtimeResearch?.ok ? text + "\n\n" + runtimeResearch.evidence : text;
   const result = await callOpenAICompatible(provider, agent, [
     { role: "system", content: agentSystemPrompt(agent) + "\n\nYou are speaking in a Feishu chat. Unless the user explicitly asks otherwise, use Chinese. Start with the answer, then use 2-5 short lines or bullets. Do not use Markdown headings, tables, report templates, or long preambles in normal chat. Only give long-form detail when the user asks to expand, draft, or write a plan. In a collaboration, directly engage with the previous contribution rather than repeating it." },
-    { role: "user", content: text }
+    { role: "user", content: runtimeText }
   ]);
-  return result.content;
+  let content = result.content;
+  if (runtimeResearch?.ok && runtimeResearch.appendix && !runtimeResearch.sources.some((source) => content.includes(source.url))) {
+    content += runtimeResearch.appendix;
+  }
+  return content;
 }
 function firstReadyProvider(db) {
   return db.providers.find((provider) => provider.enabled && provider.apiKey && provider.type === "openai_compatible");
@@ -1918,7 +1986,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
     } else if (groupContext) {
       promptText = "Recent group context (use it only when relevant):\n" + groupContext + "\n\nCurrent user request:\n" + message.text;
     }
-    replyText = await runAgentReply(db, bot.agentId || "daily_assistant", promptText);
+    replyText = await runAgentReply(db, bot.agentId || "daily_assistant", promptText, { enableTools: !task, feature: "feishu_reply" });
   } catch (error) {
     replyText = "Processing failed: " + error.message;
   }
@@ -2118,6 +2186,48 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     if (req.method === "GET" && pathname === "/api/model-usage") {
       return sendJson(res, 200, modelUsageSummary());
+    }
+    if (req.method === "GET" && pathname === "/api/runtime") {
+      const db = readDb();
+      const settings = publicRuntimeSettings(db.settings?.runtime, maskSecret);
+      return sendJson(res, 200, {
+        settings,
+        tools: TOOL_CATALOG,
+        usage: runtimeUsageSummary(db.settings?.runtime, storagePaths().toolUsagePath)
+      });
+    }
+    if (req.method === "POST" && pathname === "/api/runtime") {
+      const body = await readBody(req);
+      const db = readDb();
+      const existing = normalizeRuntimeSettings(db.settings?.runtime);
+      const incomingSearch = body.search || {};
+      db.settings.runtime = normalizeRuntimeSettings({
+        ...existing,
+        ...body,
+        search: {
+          ...existing.search,
+          ...incomingSearch,
+          apiKey: incomingSecretValue(incomingSearch.apiKey, existing.search.apiKey)
+        },
+        webReader: { ...existing.webReader, ...(body.webReader || {}) }
+      });
+      writeDb(db);
+      return sendJson(res, 200, {
+        settings: publicRuntimeSettings(db.settings.runtime, maskSecret),
+        usage: runtimeUsageSummary(db.settings.runtime, storagePaths().toolUsagePath)
+      });
+    }
+    if (req.method === "POST" && pathname === "/api/runtime/test") {
+      const body = await readBody(req);
+      const db = readDb();
+      const query = String(body.query || "").trim();
+      if (!query) throw new Error("Search test query is required.");
+      const result = await executeTool("web_search", { query }, { settings: db.settings?.runtime });
+      return sendJson(res, 200, {
+        ok: true,
+        provider: result.provider,
+        sources: result.sources.slice(0, 5)
+      });
     }
     if (req.method === "POST" && pathname === "/api/providers") {
       const body = await readBody(req);

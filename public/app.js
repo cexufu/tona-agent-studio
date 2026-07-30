@@ -5,6 +5,7 @@ const state = {
   selectedWorkflowId: null,
   selectedLarkBotId: null,
   modelUsage: null,
+  runtime: null,
   latestFinalOutput: ""
 };
 
@@ -72,9 +73,10 @@ function currentWorkflow() {
 }
 
 async function loadState() {
-  const [db, modelUsage] = await Promise.all([api("/api/state"), api("/api/model-usage")]);
+  const [db, modelUsage, runtime] = await Promise.all([api("/api/state"), api("/api/model-usage"), api("/api/runtime")]);
   state.db = db;
   state.modelUsage = modelUsage;
+  state.runtime = runtime;
   state.selectedProviderId ||= state.db.providers[0]?.id;
   state.selectedAgentId ||= state.db.agents[0]?.id;
   state.selectedWorkflowId ||= state.db.workflows[0]?.id;
@@ -87,6 +89,7 @@ function renderAll() {
   renderStudioSteps();
   renderProviders();
   renderModelUsage();
+  renderRuntime();
   renderProviderForm();
   renderAgentProviderSelect();
   renderAgents();
@@ -100,6 +103,77 @@ function renderAll() {
   renderLarkBotForm();
   renderLarkAppDiagnosis();
   refreshAssistantHealth();
+}
+
+function runtimeFormPayload() {
+  const form = document.querySelector("#runtimeForm");
+  const data = formData(form);
+  return {
+    enabled: data.enabled === "true",
+    search: {
+      provider: data.searchProvider,
+      apiKey: data.searchApiKey,
+      dailyLimit: Number(data.dailyLimit),
+      maxResults: Number(data.maxResults),
+      enabled: true
+    },
+    webReader: {
+      enabled: data.webReaderEnabled === "true",
+      maxCharacters: Number(data.maxCharacters)
+    }
+  };
+}
+
+function renderRuntime() {
+  const form = document.querySelector("#runtimeForm");
+  if (!form || !state.runtime) return;
+  const settings = state.runtime.settings || {};
+  setForm(form, {
+    enabled: settings.enabled,
+    searchProvider: settings.search?.provider,
+    searchApiKey: settings.search?.apiKey || "",
+    dailyLimit: settings.search?.dailyLimit,
+    maxResults: settings.search?.maxResults,
+    webReaderEnabled: settings.webReader?.enabled,
+    maxCharacters: settings.webReader?.maxCharacters
+  });
+  const ready = settings.search?.ready;
+  document.querySelector("#runtimeReadyBadge").textContent = ready ? "联网可用" : "需要 Search Key";
+  document.querySelector("#runtimeReadyBadge").className = "pill " + (ready ? "enabled" : "disabled");
+  const usage = state.runtime.usage || {};
+  document.querySelector("#runtimeUsageBadge").textContent = "今日搜索 " + Number(usage.todaySearches || 0) + "/" + Number(usage.dailyLimit || 0);
+  document.querySelector("#runtimeStatus").innerHTML =
+    "<p><strong>凭证来源：</strong>" + escapeHtml(settings.search?.credentialSource === "workspace" ? "当前工作区" : settings.search?.credentialSource === "platform" ? "TONA 平台" : "未配置") + "</p>" +
+    "<p><strong>搜索供应商：</strong>" + escapeHtml(settings.search?.provider || "tavily") + "</p>" +
+    "<p><strong>安全策略：</strong>只允许公开 HTTP/HTTPS；阻止 localhost、内网地址和超大页面。</p>";
+  document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) =>
+    '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><span class="pill ' + (tool.status === "ready" ? "enabled" : "") + '">' + (tool.status === "ready" ? "可用" : "规划中") + '</span></div>'
+  ).join("");
+}
+
+async function saveRuntime() {
+  const result = await api("/api/runtime", { method: "POST", body: JSON.stringify(runtimeFormPayload()) });
+  state.runtime = { ...state.runtime, ...result, tools: state.runtime.tools };
+  renderRuntime();
+  toast("Runtime 工具配置已保存");
+}
+
+async function testRuntime() {
+  const button = document.querySelector("#testRuntimeButton");
+  const resultBox = document.querySelector("#runtimeTestResult");
+  button.disabled = true;
+  resultBox.textContent = "正在联网搜索...";
+  try {
+    await saveRuntime();
+    const result = await api("/api/runtime/test", { method: "POST", body: JSON.stringify({ query: document.querySelector("#runtimeTestQuery").value }) });
+    resultBox.innerHTML = "测试通过：" + escapeHtml(result.provider) + "<br>" + result.sources.map((source, index) => (index + 1) + ". " + escapeHtml(source.title)).join("<br>");
+    state.runtime = await api("/api/runtime");
+    renderRuntime();
+  } catch (error) {
+    resultBox.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function refreshAssistantHealth() {
@@ -757,6 +831,8 @@ function bindEvents() {
     toast("最终稿已复制");
   });
   $("#sendToLarkButton").addEventListener("click", sendToLark);
+  bindIfPresent("#saveRuntimeButton", "click", saveRuntime);
+  bindIfPresent("#testRuntimeButton", "click", testRuntime);
   bindIfPresent("#providerForm", "submit", saveProvider);
   bindIfPresent("#agentForm", "submit", saveAgent);
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);

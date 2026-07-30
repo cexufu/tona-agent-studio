@@ -22,6 +22,7 @@
           <button class="nav-item" data-view="providers">模型</button>
           <button class="nav-item" data-view="agents">角色</button>
           <button class="nav-item" data-view="workflows">Skill Center</button>
+          <button class="nav-item" data-view="runtime">工具</button>
           <button class="nav-item" data-view="lark">飞书</button>
           <button class="nav-item" data-view="runs">记录</button>
         </nav>
@@ -263,6 +264,41 @@
           </div>
         </section>
 
+
+        <section class="view" id="view-runtime">
+          <div class="topbar">
+            <div>
+              <p class="eyebrow">Agent Runtime</p>
+              <h2>工具与联网能力</h2>
+              <p class="page-subtitle">模型负责思考，Runtime 负责真实搜索、读取和留存来源。工具 Key 只保存在当前工作区。</p>
+            </div>
+            <button class="primary" id="saveRuntimeButton" type="button">保存工具配置</button>
+          </div>
+          <div class="runtime-layout">
+            <section class="panel">
+              <div class="panel-heading"><h3>联网搜索</h3><span id="runtimeReadyBadge">尚未配置</span></div>
+              <form id="runtimeForm" class="form-grid">
+                <label>Runtime 状态<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
+                <label>搜索供应商<select name="searchProvider"><option value="tavily">Tavily</option><option value="brave">Brave Search</option></select></label>
+                <label class="span-2">Search API Key<input name="searchApiKey" type="password" placeholder="留空则使用平台 Key；已设置时显示遮罩" /></label>
+                <label>每日搜索上限<input name="dailyLimit" type="number" min="1" max="500" value="30" /></label>
+                <label>每次来源数量<input name="maxResults" type="number" min="2" max="8" value="5" /></label>
+                <label>网页读取<select name="webReaderEnabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
+                <label>单页最大字符<input name="maxCharacters" type="number" min="2000" max="50000" value="16000" /></label>
+              </form>
+              <div class="runtime-test">
+                <label>测试查询<input id="runtimeTestQuery" value="搜索 TONA Agent Runtime 的最新公开资料" /></label>
+                <button id="testRuntimeButton" type="button">测试联网</button>
+              </div>
+              <div id="runtimeTestResult" class="meta">尚未测试。</div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading"><h3>Runtime 状态</h3><span id="runtimeUsageBadge"></span></div>
+              <div id="runtimeStatus" class="runtime-status"></div>
+              <div id="runtimeToolCatalog" class="tool-catalog"></div>
+            </section>
+          </div>
+        </section>
 
         <section class="view" id="view-lark">
           <div class="topbar">
