@@ -113,6 +113,7 @@ function runtimeFormPayload() {
     search: {
       provider: data.searchProvider,
       apiKey: data.searchApiKey,
+      apiBase: data.searchApiBase,
       dailyLimit: Number(data.dailyLimit),
       maxResults: Number(data.maxResults),
       enabled: true
@@ -132,6 +133,7 @@ function renderRuntime() {
     enabled: settings.enabled,
     searchProvider: settings.search?.provider,
     searchApiKey: settings.search?.apiKey || "",
+    searchApiBase: settings.search?.apiBase || "",
     dailyLimit: settings.search?.dailyLimit,
     maxResults: settings.search?.maxResults,
     webReaderEnabled: settings.webReader?.enabled,
@@ -144,7 +146,8 @@ function renderRuntime() {
   document.querySelector("#runtimeUsageBadge").textContent = "今日搜索 " + Number(usage.todaySearches || 0) + "/" + Number(usage.dailyLimit || 0);
   document.querySelector("#runtimeStatus").innerHTML =
     "<p><strong>凭证来源：</strong>" + escapeHtml(settings.search?.credentialSource === "workspace" ? "当前工作区" : settings.search?.credentialSource === "platform" ? "TONA 平台" : "未配置") + "</p>" +
-    "<p><strong>搜索供应商：</strong>" + escapeHtml(settings.search?.provider || "tavily") + "</p>" +
+    "<p><strong>配置供应商：</strong>" + escapeHtml(settings.search?.provider || "bailian") + "</p>" +
+    "<p><strong>实际供应商：</strong>" + escapeHtml(settings.search?.activeProvider || settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>安全策略：</strong>只允许公开 HTTP/HTTPS；阻止 localhost、内网地址和超大页面。</p>";
   document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) =>
     '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><span class="pill ' + (tool.status === "ready" ? "enabled" : "") + '">' + (tool.status === "ready" ? "可用" : "规划中") + '</span></div>'

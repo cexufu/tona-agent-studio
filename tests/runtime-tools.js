@@ -34,13 +34,51 @@ function jsonResponse(payload, status = 200) {
     assert(needsWebResearch("读取 https://example.com/report"));
     assert(!needsWebResearch("帮我整理一下这段会议记录"));
 
-    const normalized = normalizeRuntimeSettings({ search: { maxResults: 99, dailyLimit: 0 } });
+    const normalized = normalizeRuntimeSettings({ search: { provider: "tavily", maxResults: 99, dailyLimit: 0 } });
     assert.equal(normalized.search.maxResults, 8);
     assert.equal(normalized.search.dailyLimit, 30);
     const publicSettings = publicRuntimeSettings(normalized, (value) => value.slice(0, 2) + "***", { TAVILY_API_KEY: "platform-key" });
     assert.equal(publicSettings.search.ready, true);
     assert.equal(publicSettings.search.credentialSource, "platform");
     assert.equal(publicSettings.search.apiKey, "");
+
+    const bailianSettings = normalizeRuntimeSettings({ search: { provider: "bailian", maxResults: 3 } });
+    const publicBailian = publicRuntimeSettings(bailianSettings, (value) => value.slice(0, 2) + "***", {
+      DASHSCOPE_API_KEY: "platform-bailian-key",
+      DASHSCOPE_API_BASE: "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/"
+    });
+    assert.equal(publicBailian.search.ready, true);
+    assert.equal(publicBailian.search.activeProvider, "bailian");
+    assert.equal(publicBailian.search.apiBase, "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1");
+
+    const fetchBailian = async (url, options) => {
+      assert.equal(String(url), "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/text-generation/generation");
+      assert.equal(options.headers.Authorization, "Bearer platform-bailian-key");
+      const body = JSON.parse(options.body);
+      assert.equal(body.model, "qwen-flash");
+      assert.equal(body.parameters.enable_search, true);
+      assert.equal(body.parameters.search_options.search_strategy, "turbo");
+      assert.equal(body.parameters.search_options.enable_source, true);
+      return jsonResponse({
+        output: {
+          choices: [{ message: { content: "这是带引用的实时搜索摘要[1]。" } }],
+          search_info: { search_results: [
+            { index: 1, title: "百炼来源", url: "https://example.cn/news", site_name: "示例网站" }
+          ] }
+        }
+      });
+    };
+    const bailianSearch = await executeTool(
+      "web_search",
+      { query: "国内最新 AI 新闻" },
+      { settings: { search: { provider: "bailian" } }, env: {
+        DASHSCOPE_API_KEY: "platform-bailian-key",
+        DASHSCOPE_API_BASE: "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1"
+      }, fetch: fetchBailian }
+    );
+    assert.equal(bailianSearch.provider, "bailian");
+    assert.equal(bailianSearch.sources.length, 1);
+    assert.match(evidenceContext(bailianSearch), /实时搜索摘要/);
 
     await assert.rejects(
       () => assertSafePublicUrl("http://localhost/private"),
@@ -102,7 +140,7 @@ function jsonResponse(payload, status = 200) {
     const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
     assert(html.includes('data-view="runtime"'));
     assert(html.includes('id="runtimeForm"'));
-    console.log("Runtime tools test passed: registry, workspace/platform credentials, Tavily adapter, safe web reader, evidence citations, audit usage, and Studio UI.");
+    console.log("Runtime tools test passed: registry, workspace/platform credentials, Bailian/Tavily adapters, safe web reader, evidence citations, audit usage, and Studio UI.");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

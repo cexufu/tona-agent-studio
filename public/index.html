@@ -279,8 +279,9 @@
               <div class="panel-heading"><h3>联网搜索</h3><span id="runtimeReadyBadge">尚未配置</span></div>
               <form id="runtimeForm" class="form-grid">
                 <label>Runtime 状态<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
-                <label>搜索供应商<select name="searchProvider"><option value="tavily">Tavily</option><option value="brave">Brave Search</option></select></label>
+                <label>搜索供应商<select name="searchProvider"><option value="bailian">阿里云百炼（国内）</option><option value="tavily">Tavily</option><option value="brave">Brave Search</option></select></label>
                 <label class="span-2">Search API Key<input name="searchApiKey" type="password" placeholder="留空则使用平台 Key；已设置时显示遮罩" /></label>
+                <label class="span-2">DashScope API Base<input name="searchApiBase" type="url" placeholder="留空则使用 Render 中的平台地址；自带百炼 Key 时填写完整 /api/v1 地址" /></label>
                 <label>每日搜索上限<input name="dailyLimit" type="number" min="1" max="500" value="30" /></label>
                 <label>每次来源数量<input name="maxResults" type="number" min="2" max="8" value="5" /></label>
                 <label>网页读取<select name="webReaderEnabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
