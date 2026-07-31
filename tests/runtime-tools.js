@@ -68,14 +68,15 @@ function jsonResponse(payload, status = 200) {
         }
       });
     };
-    const bailianSearch = await executeTool(
+    const bailianExecution = await executeTool(
       "web_search",
       { query: "国内最新 AI 新闻" },
       { settings: { search: { provider: "bailian" } }, env: {
         DASHSCOPE_API_KEY: "platform-bailian-key",
         DASHSCOPE_API_BASE: "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1"
-      }, fetch: fetchBailian }
+      }, fetch: fetchBailian, workspaceId: "usr_test", authorizedWorkspaceId: "usr_test" }
     );
+    const bailianSearch = bailianExecution.data;
     assert.equal(bailianSearch.provider, "bailian");
     assert.equal(bailianSearch.sources.length, 1);
     assert.match(evidenceContext(bailianSearch), /实时搜索摘要/);
@@ -98,11 +99,12 @@ function jsonResponse(payload, status = 200) {
         ]
       });
     };
-    const search = await executeTool(
+    const searchExecution = await executeTool(
       "web_search",
       { query: "latest runtime" },
-      { settings: { search: { provider: "tavily", apiKey: "workspace-key" } }, fetch: fetchSearch }
+      { settings: { search: { provider: "tavily", apiKey: "workspace-key" } }, fetch: fetchSearch, workspaceId: "usr_test", authorizedWorkspaceId: "usr_test" }
     );
+    const search = searchExecution.data;
     assert.equal(search.sources.length, 1);
     assert.match(evidenceContext(search), /\[1\] Runtime source/);
     assert.match(sourceAppendix(search), /https:\/\/example.com\/runtime/);
@@ -150,7 +152,7 @@ function jsonResponse(payload, status = 200) {
     const continuedUsage = runtimeUsageSummary({ search: { dailyLimit: 10 } }, usagePath);
     assert.equal(continuedUsage.todaySearches, 5);
 
-    const read = await executeTool(
+    const readExecution = await executeTool(
       "web_read",
       { url: "https://example.com/page" },
       {
@@ -159,9 +161,11 @@ function jsonResponse(payload, status = 200) {
         fetch: async () => new Response("<html><title>Example</title><body><script>bad()</script><h1>Useful evidence</h1></body></html>", {
           status: 200,
           headers: { "content-type": "text/html" }
-        })
+        }),
+        workspaceId: "usr_test", authorizedWorkspaceId: "usr_test"
       }
     );
+    const read = readExecution.data;
     assert.equal(read.title, "Example");
     assert.match(read.content, /Useful evidence/);
     assert(!read.content.includes("bad()"));

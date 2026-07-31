@@ -93,12 +93,17 @@ async function prepareRuntimeResearch({ settings, text, usagePath, workspaceId, 
       if (recentSuccessfulSearches.length >= SEARCH_BURST_LIMIT) {
         throw new Error("Web search burst protection is active (" + SEARCH_BURST_LIMIT + " calls per " + (SEARCH_BURST_WINDOW_MS / 60000) + " minutes). Please retry shortly.");
       }
-      result = await executeTool("web_search", { query: String(text).slice(0, 1000) }, { settings: normalized, env, fetch, lookup });
+      const execution = await executeTool("web_search", { query: String(text).slice(0, 1000) }, {
+        settings: normalized, env, fetch, lookup, workspaceId, authorizedWorkspaceId: workspaceId,
+        idempotencyKey: `research:${hash}`
+      });
+      result = execution.data;
       searchResultCache.set(cacheKey, { at: Date.now(), result });
     } else {
       const pages = [];
       for (const url of urls.slice(0, 2)) {
-        const page = await executeTool("web_read", { url }, { settings: normalized, env, fetch, lookup });
+        const execution = await executeTool("web_read", { url }, { settings: normalized, env, fetch, lookup, workspaceId, authorizedWorkspaceId: workspaceId, idempotencyKey: `web-read:${queryHash(url)}` });
+        const page = execution.data;
         pages.push({
           title: page.title,
           url: page.url,
@@ -147,6 +152,7 @@ async function prepareRuntimeResearch({ settings, text, usagePath, workspaceId, 
 
 module.exports = {
   readToolEvents,
+  writeToolEvent,
   runtimeUsageSummary,
   prepareRuntimeResearch
 };

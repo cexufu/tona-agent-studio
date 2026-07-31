@@ -23,6 +23,7 @@
           <button class="nav-item" data-view="agents">角色</button>
           <button class="nav-item" data-view="workflows">Skill Center</button>
           <button class="nav-item" data-view="runtime">工具</button>
+          <button class="nav-item" data-view="files">文件</button>
           <button class="nav-item" data-view="lark">飞书</button>
           <button class="nav-item" data-view="runs">记录</button>
         </nav>
@@ -302,6 +303,37 @@
           </div>
         </section>
 
+        <section class="view" id="view-files">
+          <div class="topbar">
+            <div><p class="eyebrow">Workspace Files</p><h2>文件与产物</h2><p class="page-subtitle">文件按当前工作区隔离，读取校验 SHA-256；产物记录 file_id、artifact_id 和版本。</p></div>
+            <button id="refreshFilesButton" type="button">刷新</button>
+          </div>
+          <div class="runtime-layout">
+            <section class="panel">
+              <div class="panel-heading"><h3>上传文件</h3><span class="pill">最大 10MB</span></div>
+              <form id="fileUploadForm" class="form-grid">
+                <label class="span-2">选择文件<input id="workspaceFileInput" type="file" accept=".txt,.md,.markdown,.html,.json,.csv,.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp" required /></label>
+                <button class="primary span-2" type="submit">上传到当前工作区</button>
+              </form>
+              <p class="meta">可直接提取 TXT、Markdown、HTML、JSON、CSV。Office、PDF 与图片会安全保存，解析器接入前不会伪造读取结果。</p>
+            </section>
+            <section class="panel">
+              <div class="panel-heading"><h3>生成产物</h3><span class="pill enabled">Runtime v2</span></div>
+              <form id="artifactGenerateForm" class="form-grid">
+                <label>文件名<input name="name" value="tona-output.md" required /></label>
+                <label>格式<select name="format"><option value="markdown">Markdown</option><option value="txt">TXT</option><option value="html">HTML</option><option value="json">JSON</option><option value="csv">CSV</option></select></label>
+                <label class="span-2">内容<textarea name="content" rows="8" placeholder="输入要保存的内容；JSON 需为合法 JSON。"></textarea></label>
+                <button class="primary span-2" type="submit">确认生成工作区产物</button>
+              </form>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-heading"><h3>当前工作区文件</h3><span id="workspaceFileCount" class="pill">0</span></div>
+            <div id="workspaceFileList" class="tool-catalog"><p class="meta">正在加载…</p></div>
+            <pre id="workspaceFilePreview" class="result-box">选择“读取”后在这里显示可验证文本。</pre>
+          </section>
+        </section>
+
         <section class="view" id="view-lark">
           <div class="topbar">
             <div>
@@ -393,6 +425,7 @@
 
     <div id="toast" class="toast"></div>
     <script src="/app.js"></script>
+    <script src="/files.js"></script>
   </body>
 </html>
 

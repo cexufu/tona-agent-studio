@@ -44,6 +44,8 @@ async function waitUntilReady() {
     const initial = await request("/api/runtime");
     assert.equal(initial.status, 200);
     assert.equal(initial.body.settings.search.ready, false);
+    assert(initial.body.tools.some((tool) => tool.id === "math_calculate" && tool.inputSchema && tool.outputSchema));
+    assert(initial.body.tools.every((tool) => tool.risk && tool.policy?.timeoutMs));
 
     const saved = await request("/api/runtime", {
       method: "POST",
@@ -69,6 +71,30 @@ async function waitUntilReady() {
     });
     assert.equal(preserved.body.settings.search.ready, true);
     assert.equal(preserved.body.settings.search.dailyLimit, 15);
+
+    const calculated = await request("/api/runtime/tools/math_calculate/run", {
+      method: "POST",
+      headers: { "Idempotency-Key": "api-math-1" },
+      body: JSON.stringify({ input: { expression: "sqrt(81) + 3" } })
+    });
+    assert.equal(calculated.status, 200);
+    assert.equal(calculated.body.protocolVersion, "2.0");
+    assert.equal(calculated.body.resultType, "tool_result");
+    assert.equal(calculated.body.data.value, 12);
+    const idempotent = await request("/api/runtime/tools/math_calculate/run", {
+      method: "POST",
+      headers: { "Idempotency-Key": "api-math-1" },
+      body: JSON.stringify({ input: { expression: "999" } })
+    });
+    assert.equal(idempotent.body.meta.cached, true);
+    assert.equal(idempotent.body.data.value, 12);
+    const invalid = await request("/api/runtime/tools/math_calculate/run", {
+      method: "POST",
+      body: JSON.stringify({ input: { expression: "" } })
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.code, "TOOL_SCHEMA_INVALID");
+    assert.equal(invalid.body.category, "validation");
 
     const stored = fs.readFileSync(path.join(dataDir, "studio.json"), "utf8");
     assert(!stored.includes(apiKey));

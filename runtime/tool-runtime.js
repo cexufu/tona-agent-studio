@@ -1,5 +1,8 @@
 const dns = require("dns").promises;
 const net = require("net");
+const { deterministicTools } = require("./deterministic-tools");
+const { fileTools } = require("./workspace-files");
+const { createToolRegistry, publicToolDefinition, executeRegisteredTool } = require("./runtime-v2");
 
 const TOOL_CATALOG = [
   {
@@ -281,7 +284,7 @@ async function searchBailian(query, settings, credential, fetchImpl = fetch) {
   return { summary, sources };
 }
 
-async function executeTool(name, input, context = {}) {
+async function executeToolData(name, input, context = {}) {
   const settings = normalizeRuntimeSettings(context.settings);
   if (!settings.enabled) throw new Error("TONA Runtime tools are disabled in this workspace.");
   if (name === "web_read") {
@@ -309,6 +312,51 @@ async function executeTool(name, input, context = {}) {
     return { query: input.query, provider: credential.provider, credentialSource: credential.source, summary, sources };
   }
   throw new Error(`Unknown Runtime tool: ${name}`);
+}
+
+const sourceSchema = {
+  type: "object",
+  required: ["title", "url", "excerpt", "retrievedAt"],
+  properties: {
+    title: { type: "string" }, url: { type: "string" }, excerpt: { type: "string" },
+    score: { type: ["number", "null"] }, publishedAt: { type: "string" }, retrievedAt: { type: "string" }
+  }
+};
+const webPolicy = { timeoutMs: 35000, retries: 1, idempotent: true, rateLimit: { maxCalls: 20, windowMs: 10 * 60 * 1000 } };
+const webTools = [
+  {
+    id: "web_search", name: "联网搜索", category: "research", risk: "read", status: "ready",
+    description: "搜索公开网页、新闻与最新资料，并返回可追溯来源。", policy: webPolicy,
+    inputSchema: { type: "object", additionalProperties: false, required: ["query"], properties: { query: { type: "string", minLength: 1, maxLength: 1000 } } },
+    outputSchema: { type: "object", additionalProperties: false, required: ["query", "provider", "credentialSource", "summary", "sources"], properties: { query: { type: "string" }, provider: { type: "string" }, credentialSource: { type: "string" }, summary: { type: "string" }, sources: { type: "array", items: sourceSchema } } },
+    handler: (input, context) => executeToolData("web_search", input, context)
+  },
+  {
+    id: "web_read", name: "网页读取", category: "research", risk: "read", status: "ready",
+    description: "读取用户明确提供的公开网页，提取正文用于分析。", policy: { ...webPolicy, timeoutMs: 20000 },
+    inputSchema: { type: "object", additionalProperties: false, required: ["url"], properties: { url: { type: "string", minLength: 8, maxLength: 2048 } } },
+    outputSchema: { type: "object", additionalProperties: false, required: ["title", "url", "content", "retrievedAt"], properties: { title: { type: "string" }, url: { type: "string" }, content: { type: "string" }, retrievedAt: { type: "string" } } },
+    handler: (input, context) => executeToolData("web_read", input, context)
+  }
+];
+const TOOL_REGISTRY = createToolRegistry([...webTools, ...deterministicTools, ...fileTools]);
+const plannedSchemas = {
+  pdf_parse: {
+    policy: { timeoutMs: 30000, retries: 0, idempotent: true, rateLimit: { maxCalls: 30, windowMs: 60000 } },
+    inputSchema: { type: "object", required: ["file_id"], properties: { file_id: { type: "string" } } },
+    outputSchema: { type: "object", required: ["artifact_id"], properties: { artifact_id: { type: "string" } } }
+  },
+  python_runtime: {
+    policy: { timeoutMs: 60000, retries: 0, idempotent: false, rateLimit: { maxCalls: 10, windowMs: 60000 } },
+    inputSchema: { type: "object", required: ["code"], properties: { code: { type: "string" } } },
+    outputSchema: { type: "object", required: ["artifacts"], properties: { artifacts: { type: "array" } } }
+  }
+};
+const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned").map((tool) => ({ ...tool, ...plannedSchemas[tool.id] }));
+TOOL_CATALOG.splice(0, TOOL_CATALOG.length, ...[...TOOL_REGISTRY.values()].map(publicToolDefinition), ...plannedTools);
+
+async function executeTool(name, input, context = {}) {
+  return executeRegisteredTool(TOOL_REGISTRY, name, input, context);
 }
 
 function evidenceContext(result) {

@@ -10,8 +10,11 @@ const {
   publicRuntimeSettings,
   executeTool
 } = require("./runtime/tool-runtime");
+const { WorkspaceFileStore, MAX_FILE_BYTES } = require("./runtime/workspace-files");
+const { prepareAgentToolResult } = require("./runtime/agent-tools");
 const {
   runtimeUsageSummary,
+  writeToolEvent,
   prepareRuntimeResearch
 } = require("./runtime/server-support");
 
@@ -312,15 +315,31 @@ function storagePaths() {
     dbPath: ROOT_DB_PATH,
     runsDir: ROOT_RUNS_DIR,
     usagePath: path.join(DATA_DIR, "model-usage.jsonl"),
-    toolUsagePath: path.join(DATA_DIR, "tool-usage.jsonl")
+    toolUsagePath: path.join(DATA_DIR, "tool-usage.jsonl"),
+    filesDir: path.join(DATA_DIR, "files")
   };
   const directory = path.join(WORKSPACES_DIR, workspaceId);
   return {
     dbPath: path.join(directory, "studio.json"),
     runsDir: path.join(directory, "runs"),
     usagePath: path.join(directory, "model-usage.jsonl"),
-    toolUsagePath: path.join(directory, "tool-usage.jsonl")
+    toolUsagePath: path.join(directory, "tool-usage.jsonl"),
+    filesDir: path.join(directory, "files")
   };
+}
+
+function workspaceFileStore() {
+  return new WorkspaceFileStore(storagePaths().filesDir, activeWorkspaceId() || LEGACY_OWNER_ID);
+}
+
+function decodeFileContent(body) {
+  if (!body.contentBase64) return Buffer.from(String(body.text || ""), "utf8");
+  const encoded = String(body.contentBase64).replace(/\s+/g, "");
+  let buffer;
+  try { buffer = Buffer.from(encoded, "base64"); }
+  catch { throw Object.assign(new Error("Invalid base64 file content."), { statusCode: 400 }); }
+  if (buffer.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) throw Object.assign(new Error("Invalid base64 file content."), { statusCode: 400 });
+  return buffer;
 }
 
 function ensureStore() {
@@ -648,12 +667,12 @@ function sendText(res, status, body, contentType = "text/plain; charset=utf-8") 
   res.end(body);
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = 2_000_000) {
   return new Promise((resolve, reject) => {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 2_000_000) {
+      if (Buffer.byteLength(body) > maxBytes) {
         reject(new Error("Request body is too large."));
         req.destroy();
       }
@@ -1227,6 +1246,18 @@ async function runAgentReply(db, agentId, text, options = {}) {
   if (!agent) return "我还没有配置角色。请先在 TONA 的“角色”页创建一个角色。";
   const provider = db.providers.find((item) => item.id === agent.providerId) || firstReadyProvider(db);
   if (!provider || !provider.enabled || !provider.apiKey) return "我在，但这个角色还没有可用模型。请先在 TONA 的“模型”页启用一个模型，并在“角色”页绑定给我。";
+  const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  let deterministicResult = null;
+  if (options.enableTools) {
+    try {
+      deterministicResult = await prepareAgentToolResult({
+        text, workspaceId, fileStore: workspaceFileStore, timeZone: db.settings?.timeZone || "UTC",
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, { ...event, feature: options.feature || "agent_reply" })
+      });
+    } catch (error) {
+      return `\u8fd9\u6b21\u5de5\u5177\u6267\u884c\u5931\u8d25\uff1a${String(error?.message || error).slice(0, 240)}\n\u8bf7\u68c0\u67e5\u8f93\u5165\u540e\u91cd\u8bd5\u3002`;
+    }
+  }
   const runtimeResearch = options.enableTools ? await prepareRuntimeResearch({
     settings: db.settings?.runtime,
     text,
@@ -1237,7 +1268,8 @@ async function runAgentReply(db, agentId, text, options = {}) {
   if (runtimeResearch?.requested && !runtimeResearch.ok) {
     return "我收到了联网请求，但当前搜索工具还不能工作：" + runtimeResearch.error + "。请在 AI Studio 的“工具”页面配置搜索 API Key。";
   }
-  const runtimeText = runtimeResearch?.ok ? text + "\n\n" + runtimeResearch.evidence : text;
+  const runtimeEvidence = [deterministicResult?.evidence, runtimeResearch?.ok ? runtimeResearch.evidence : ""].filter(Boolean).join("\n\n");
+  const runtimeText = runtimeEvidence ? text + "\n\n" + runtimeEvidence : text;
   const result = await callOpenAICompatible(provider, agent, [
     { role: "system", content: agentSystemPrompt(agent) + "\n\nYou are speaking in a Feishu chat. Unless the user explicitly asks otherwise, use Chinese. Start with the answer, then use 2-5 short lines or bullets. Do not use Markdown headings, tables, report templates, or long preambles in normal chat. Only give long-form detail when the user asks to expand, draft, or write a plan. In a collaboration, directly engage with the previous contribution rather than repeating it." },
     { role: "user", content: runtimeText }
@@ -2222,12 +2254,88 @@ async function handleApiInWorkspace(req, res, pathname) {
       const db = readDb();
       const query = String(body.query || "").trim();
       if (!query) throw new Error("Search test query is required.");
-      const result = await executeTool("web_search", { query }, { settings: db.settings?.runtime });
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const execution = await executeTool("web_search", { query }, {
+        settings: db.settings?.runtime,
+        workspaceId,
+        authorizedWorkspaceId: workspaceId,
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
+      });
       return sendJson(res, 200, {
         ok: true,
-        provider: result.provider,
-        sources: result.sources.slice(0, 5)
+        invocationId: execution.invocationId,
+        provider: execution.data.provider,
+        sources: execution.data.sources.slice(0, 5)
       });
+    }
+    const runtimeToolMatch = pathname.match(/^\/api\/runtime\/tools\/([A-Za-z0-9_-]{1,80})\/run$/);
+    if (req.method === "POST" && runtimeToolMatch) {
+      const body = await readBody(req, MAX_FILE_BYTES * 2);
+      const db = readDb();
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const execution = await executeTool(runtimeToolMatch[1], body.input || {}, {
+        settings: db.settings?.runtime, workspaceId, authorizedWorkspaceId: workspaceId,
+        idempotencyKey: String(req.headers["idempotency-key"] || body.idempotencyKey || "").slice(0, 120),
+        allowedRisks: body.confirmed === true ? ["read", "write"] : ["read"],
+        fileStore: ["file_read", "artifact_generate"].includes(runtimeToolMatch[1]) ? workspaceFileStore() : undefined,
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
+      });
+      return sendJson(res, 200, execution);
+    }
+    if (req.method === "GET" && pathname === "/api/files") {
+      return sendJson(res, 200, { files: workspaceFileStore().list() });
+    }
+    if (req.method === "POST" && pathname === "/api/files") {
+      const body = await readBody(req, MAX_FILE_BYTES * 2);
+      const buffer = decodeFileContent(body);
+      const file = workspaceFileStore().save({ name: body.name, mime: body.mime, buffer, source: "studio_upload", createdBy: String(body.createdBy || "studio").slice(0, 80) });
+      return sendJson(res, 201, { file });
+    }
+    if (req.method === "POST" && pathname === "/api/files/generate") {
+      const body = await readBody(req, MAX_FILE_BYTES * 2);
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const execution = await executeTool("artifact_generate", body, {
+        workspaceId, authorizedWorkspaceId: workspaceId, allowedRisks: ["read", "write"], fileStore: workspaceFileStore(),
+        idempotencyKey: String(req.headers["idempotency-key"] || "").slice(0, 120),
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
+      });
+      return sendJson(res, 201, execution);
+    }
+    const fileReadMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/read$/);
+    if (req.method === "GET" && fileReadMatch) {
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const execution = await executeTool("file_read", { file_id: fileReadMatch[1] }, {
+        workspaceId, authorizedWorkspaceId: workspaceId, fileStore: workspaceFileStore(),
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
+      });
+      return sendJson(res, 200, execution);
+    }
+    const fileContentMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/content$/);
+    if (req.method === "GET" && fileContentMatch) {
+      const value = workspaceFileStore().readBuffer(fileContentMatch[1]);
+      res.writeHead(200, {
+        "Content-Type": value.selected.mime, "Content-Length": value.buffer.length,
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(value.selected.name)}`,
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"
+      });
+      return res.end(value.buffer);
+    }
+    const fileVersionMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/versions$/);
+    if (req.method === "POST" && fileVersionMatch) {
+      const body = await readBody(req, MAX_FILE_BYTES * 2);
+      const buffer = decodeFileContent(body);
+      const file = workspaceFileStore().save({ fileId: fileVersionMatch[1], name: body.name, mime: body.mime, buffer, source: "studio_version", createdBy: String(body.createdBy || "studio").slice(0, 80) });
+      return sendJson(res, 201, { file });
+    }
+    const fileMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})$/);
+    if (req.method === "PATCH" && fileMatch) {
+      const body = await readBody(req);
+      return sendJson(res, 200, { file: workspaceFileStore().rename(fileMatch[1], body.name) });
+    }
+    if (req.method === "DELETE" && fileMatch) {
+      const body = await readBody(req);
+      if (body.confirm !== true) return sendJson(res, 409, { error: "File deletion requires confirm: true.", code: "FILE_DELETE_CONFIRMATION_REQUIRED" });
+      return sendJson(res, 200, workspaceFileStore().delete(fileMatch[1]));
     }
     if (req.method === "POST" && pathname === "/api/providers") {
       const body = await readBody(req);
@@ -2409,7 +2517,14 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     sendJson(res, 404, { error: "API route not found." });
   } catch (error) {
-    sendJson(res, error.statusCode || 400, { error: error.message, dependencies: error.dependencies });
+    sendJson(res, error.statusCode || 400, {
+      error: error.message,
+      code: error.code,
+      category: error.category,
+      retryable: error.retryable,
+      invocationId: error.invocationId,
+      dependencies: error.dependencies
+    });
   }
 }
 
