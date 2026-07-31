@@ -480,6 +480,7 @@ const COLLABORATION_MAX_PARTICIPANTS = 5;
 const COLLABORATION_MAX_MESSAGES = 10;
 const GROUP_KNOWLEDGE_MAX_PER_CHAT = 500;
 const GROUP_KNOWLEDGE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const CONVERSATION_CONTEXT_MAX_TURNS = 12;
 
 function groupKnowledgeEntries(db) {
   db.settings ||= {};
@@ -488,11 +489,23 @@ function groupKnowledgeEntries(db) {
 }
 
 function rememberGroupKnowledge(db, message) {
-  if (message.chatType !== "group" || !message.messageId || !message.text) return false;
+  if (!message.chatId || !message.messageId || !message.text) return false;
   const now = Date.now();
   const entries = groupKnowledgeEntries(db).filter((item) => Date.parse(item.at || 0) >= now - GROUP_KNOWLEDGE_MAX_AGE_MS);
   if (entries.some((item) => item.chatId === message.chatId && item.messageId === message.messageId)) return false;
-  entries.push({ chatId: message.chatId, messageId: message.messageId, senderId: message.senderId || "", text: String(message.text).slice(0, 4000), at: new Date().toISOString() });
+  entries.push({
+    chatId: message.chatId,
+    chatType: message.chatType || "",
+    messageId: message.messageId,
+    parentId: message.parentId || "",
+    rootId: message.rootId || "",
+    senderId: message.senderId || "",
+    senderType: message.senderType || "user",
+    agentId: message.agentId || "",
+    agentName: message.agentName || "",
+    text: String(message.text).slice(0, 4000),
+    at: new Date().toISOString()
+  });
   const perChat = new Map();
   db.settings.groupKnowledge = entries.slice().reverse().filter((item) => {
     const count = perChat.get(item.chatId) || 0;
@@ -505,10 +518,17 @@ function rememberGroupKnowledge(db, message) {
 }
 
 function groupKnowledgeContext(db, message) {
-  if (message.chatType !== "group" || !message.chatId) return "";
-  return groupKnowledgeEntries(db).filter((item) => item.chatId === message.chatId && item.messageId !== message.messageId).slice(-20).map((item) => "[Group context] " + item.text).join("\n").slice(-10000);
+  if (!message.chatId) return "";
+  const available = groupKnowledgeEntries(db).filter((item) => item.chatId === message.chatId && item.messageId !== message.messageId);
+  const recent = available.slice(-CONVERSATION_CONTEXT_MAX_TURNS);
+  const linked = message.parentId ? available.find((item) => item.messageId === message.parentId) : null;
+  const selected = linked && !recent.some((item) => item.messageId === linked.messageId) ? [linked, ...recent] : recent;
+  return selected.map((item) => {
+    const speaker = item.senderType === "assistant" || item.senderType === "bot" ? `Assistant${item.agentName ? " " + item.agentName : ""}` : "User";
+    const relation = item.messageId === message.parentId ? " quoted by current message" : "";
+    return `[Conversation ${speaker}${relation}] ${item.text}`;
+  }).join("\n").slice(-12000);
 }
-
 function defaultCollaborationPolicy(agents = []) {
   const ids = agents.map((agent) => agent.id);
   const coordinatorAgentId = ids.includes("daily_assistant") ? "daily_assistant" : (ids[0] || "");
@@ -1504,7 +1524,9 @@ function extractFeishuMessage(eventBody) {
     }
   }
   for (const match of rawText.matchAll(/<at[^>]*>(.*?)<\/at>/gi)) if (match[1]) mentionLabels.push(match[1]);
-  return { eventType, messageId, chatId, chatType, senderType, senderId, rawText, text, isAtAll, hasDirectMention, mentionLabels, botConversation, messageType: message.message_type };
+  const parentId = message.parent_id || "";
+  const rootId = message.root_id || parentId || "";
+  return { eventType, messageId, chatId, chatType, senderType, senderId, parentId, rootId, rawText, text, isAtAll, hasDirectMention, mentionLabels, botConversation, messageType: message.message_type };
 }
 
 function normalizeMentionLabel(value) { return String(value || "").replace(/^@/, "").replace(/\s+/g, "").trim().toLowerCase(); }
@@ -1941,7 +1963,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
 
   const policy = normalizeCollaborationPolicy(db.settings?.collaborationPolicy, db.agents);
   const isHumanSender = !message.senderType || message.senderType === "user";
-  if (isHumanSender && message.chatType === "group") rememberGroupKnowledge(db, message);
+  if (isHumanSender) rememberGroupKnowledge(db, message);
   let task = null;
   let conversation = null;
   if (message.senderType === "bot") {
@@ -2016,7 +2038,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
         "Next scheduled role: " + nextLabel
       ].join("\n\n");
     } else if (groupContext) {
-      promptText = "Recent group context (use it only when relevant):\n" + groupContext + "\n\nCurrent user request:\n" + message.text;
+      promptText = "Recent conversation context, ordered from older to newer. Preserve decisions already made, resolve pronouns and short confirmations against this context, and do not ask again for information that is already present:\n" + groupContext + "\n\nCurrent user request:\n" + message.text;
     }
     replyText = await runAgentReply(db, bot.agentId || "daily_assistant", promptText, { enableTools: !task, feature: "feishu_reply" });
   } catch (error) {
@@ -2030,7 +2052,20 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
     if (task.nextAgentId) replyText += "\n\nSystem handoff: next role is " + collaborationAgentName(db, task.nextAgentId) + ".";
     else replyText += "\n\nCollaboration is complete. Wait for a human decision or a new collaboration task.";
   }
-  await replyFeishuMessage(larkBotToAppSettings(bot), message.messageId, appendBotConversationMarker(replyText, conversation));
+  const delivery = await replyFeishuMessage(larkBotToAppSettings(bot), message.messageId, appendBotConversationMarker(replyText, conversation));
+  const deliveredMessageId = delivery?.data?.message_id || delivery?.data?.message?.message_id || delivery?.message_id || `${message.messageId}:reply:${bot.id || bot.agentId || "bot"}`;
+  rememberGroupKnowledge(db, {
+    chatId: message.chatId,
+    chatType: message.chatType,
+    messageId: String(deliveredMessageId),
+    parentId: message.messageId,
+    rootId: message.rootId || message.messageId,
+    senderId: bot.openId || bot.id || "",
+    senderType: "assistant",
+    agentId: bot.agentId || "daily_assistant",
+    agentName: collaborationAgentName(db, bot.agentId || "daily_assistant"),
+    text: stripBotConversationMarker(replyText)
+  });
 }
 
 function summarizeFeishuEventLog(entry, errorText = "") {
