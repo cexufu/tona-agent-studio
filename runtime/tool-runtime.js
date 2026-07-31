@@ -38,6 +38,10 @@ const TOOL_CATALOG = [
 
 function normalizeRuntimeSettings(value = {}) {
   const search = value.search || {};
+  const requestedDailyLimit = Number(search.dailyLimit);
+  const dailyLimit = !Number.isFinite(requestedDailyLimit) || requestedDailyLimit <= 0 || requestedDailyLimit === 30
+    ? 200
+    : Math.min(1000, Math.max(10, requestedDailyLimit));
   return {
     enabled: value.enabled !== false,
     search: {
@@ -46,7 +50,7 @@ function normalizeRuntimeSettings(value = {}) {
       apiKey: String(search.apiKey || "").trim(),
       apiBase: String(search.apiBase || "").trim().replace(/\/+$/, ""),
       maxResults: Math.min(8, Math.max(2, Number(search.maxResults) || 5)),
-      dailyLimit: Math.min(500, Math.max(1, Number(search.dailyLimit) || 30))
+      dailyLimit
     },
     webReader: {
       enabled: value.webReader?.enabled !== false,

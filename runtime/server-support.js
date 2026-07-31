@@ -11,6 +11,11 @@ const {
   sourceAppendix
 } = require("./tool-runtime");
 
+const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
+const SEARCH_BURST_WINDOW_MS = 10 * 60 * 1000;
+const SEARCH_BURST_LIMIT = 20;
+const searchResultCache = new Map();
+
 function readToolEvents(usagePath) {
   if (!usagePath || !fs.existsSync(usagePath)) return [];
   return fs.readFileSync(usagePath, "utf8")
@@ -47,6 +52,9 @@ function runtimeUsageSummary(settings, usagePath, env = process.env) {
     todaySearches: searchEvents.length,
     dailyLimit: normalized.search.dailyLimit,
     remainingSearches: Math.max(0, normalized.search.dailyLimit - searchEvents.length),
+    limitMode: "cost_protection",
+    burstLimit: SEARCH_BURST_LIMIT,
+    burstWindowMinutes: SEARCH_BURST_WINDOW_MS / 60000,
     lastRun: events.at(-1) || null,
     credentialSource: credential.source
   };
@@ -63,7 +71,30 @@ async function prepareRuntimeResearch({ settings, text, usagePath, workspaceId, 
     if (tool === "web_search") {
       const usage = runtimeUsageSummary(normalized, usagePath, env);
       if (usage.todaySearches >= normalized.search.dailyLimit) throw new Error(`Today's web search limit (${normalized.search.dailyLimit}) has been reached.`);
+      const hash = queryHash(text);
+      const cacheKey = (workspaceId || "default") + ":" + hash;
+      const cached = searchResultCache.get(cacheKey);
+      if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) {
+        result = cached.result;
+        writeToolEvent(usagePath, {
+          at: new Date().toISOString(), workspaceId, feature, tool,
+          provider: result.provider, status: "cache_hit", durationMs: Date.now() - started,
+          sourceCount: result.sources.length, queryHash: hash
+        });
+        return {
+          requested: true, ok: true, cached: true, tool, provider: result.provider,
+          evidence: evidenceContext(result), appendix: sourceAppendix(result), sources: result.sources
+        };
+      }
+      const recentSuccessfulSearches = readToolEvents(usagePath).filter((event) =>
+        event.tool === "web_search" && event.status === "success" &&
+        Date.parse(event.at || 0) >= Date.now() - SEARCH_BURST_WINDOW_MS
+      );
+      if (recentSuccessfulSearches.length >= SEARCH_BURST_LIMIT) {
+        throw new Error("Web search burst protection is active (" + SEARCH_BURST_LIMIT + " calls per " + (SEARCH_BURST_WINDOW_MS / 60000) + " minutes). Please retry shortly.");
+      }
       result = await executeTool("web_search", { query: String(text).slice(0, 1000) }, { settings: normalized, env, fetch, lookup });
+      searchResultCache.set(cacheKey, { at: Date.now(), result });
     } else {
       const pages = [];
       for (const url of urls.slice(0, 2)) {

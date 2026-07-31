@@ -143,7 +143,7 @@ function renderRuntime() {
   document.querySelector("#runtimeReadyBadge").textContent = ready ? "联网可用" : "需要 Search Key";
   document.querySelector("#runtimeReadyBadge").className = "pill " + (ready ? "enabled" : "disabled");
   const usage = state.runtime.usage || {};
-  document.querySelector("#runtimeUsageBadge").textContent = "今日搜索 " + Number(usage.todaySearches || 0) + "/" + Number(usage.dailyLimit || 0);
+  document.querySelector("#runtimeUsageBadge").textContent = "今日实际调用 " + Number(usage.todaySearches || 0) + "/" + Number(usage.dailyLimit || 0) + "（成本保护）";
   document.querySelector("#runtimeStatus").innerHTML =
     "<p><strong>凭证来源：</strong>" + escapeHtml(settings.search?.credentialSource === "workspace" ? "当前工作区" : settings.search?.credentialSource === "platform" ? "TONA 平台" : "未配置") + "</p>" +
     "<p><strong>配置供应商：</strong>" + escapeHtml(settings.search?.provider || "bailian") + "</p>" +

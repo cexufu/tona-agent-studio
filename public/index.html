@@ -282,11 +282,12 @@
                 <label>搜索供应商<select name="searchProvider"><option value="bailian">阿里云百炼（国内）</option><option value="tavily">Tavily</option><option value="brave">Brave Search</option></select></label>
                 <label class="span-2">Search API Key<input name="searchApiKey" type="password" placeholder="留空则使用平台 Key；已设置时显示遮罩" /></label>
                 <label class="span-2">DashScope API Base<input name="searchApiBase" type="url" placeholder="留空则使用 Render 中的平台地址；自带百炼 Key 时填写完整 /api/v1 地址" /></label>
-                <label>每日搜索上限<input name="dailyLimit" type="number" min="1" max="500" value="30" /></label>
+                <label>每日成本保护线<input name="dailyLimit" type="number" min="10" max="1000" value="200" /></label>
                 <label>每次来源数量<input name="maxResults" type="number" min="2" max="8" value="5" /></label>
                 <label>网页读取<select name="webReaderEnabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
                 <label>单页最大字符<input name="maxCharacters" type="number" min="2000" max="50000" value="16000" /></label>
               </form>
+              <p class="meta">不限制单个任务的检索次数。只有真实发出的搜索请求才计数；10 分钟内的相同查询会复用结果，不重复消耗额度。</p>
               <div class="runtime-test">
                 <label>测试查询<input id="runtimeTestQuery" value="搜索 TONA Agent Runtime 的最新公开资料" /></label>
                 <button id="testRuntimeButton" type="button">测试联网</button>

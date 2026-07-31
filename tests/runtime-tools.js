@@ -36,7 +36,7 @@ function jsonResponse(payload, status = 200) {
 
     const normalized = normalizeRuntimeSettings({ search: { provider: "tavily", maxResults: 99, dailyLimit: 0 } });
     assert.equal(normalized.search.maxResults, 8);
-    assert.equal(normalized.search.dailyLimit, 30);
+    assert.equal(normalized.search.dailyLimit, 200);
     const publicSettings = publicRuntimeSettings(normalized, (value) => value.slice(0, 2) + "***", { TAVILY_API_KEY: "platform-key" });
     assert.equal(publicSettings.search.ready, true);
     assert.equal(publicSettings.search.credentialSource, "platform");
@@ -108,8 +108,8 @@ function jsonResponse(payload, status = 200) {
     assert.match(sourceAppendix(search), /https:\/\/example.com\/runtime/);
 
     const prepared = await prepareRuntimeResearch({
-      settings: { search: { provider: "tavily", apiKey: "workspace-key", dailyLimit: 2 } },
-      text: "请联网搜索最新 runtime",
+      settings: { search: { provider: "tavily", apiKey: "workspace-key", dailyLimit: 10 } },
+      text: "search the web latest runtime",
       usagePath,
       workspaceId: "usr_test",
       feature: "test",
@@ -117,9 +117,38 @@ function jsonResponse(payload, status = 200) {
     });
     assert.equal(prepared.ok, true);
     assert.equal(prepared.sources.length, 1);
-    const usage = runtimeUsageSummary({ search: { dailyLimit: 2 } }, usagePath);
+    const usage = runtimeUsageSummary({ search: { dailyLimit: 10 } }, usagePath);
     assert.equal(usage.todaySearches, 1);
-    assert.equal(usage.remainingSearches, 1);
+    assert.equal(usage.remainingSearches, 9);
+    assert.equal(usage.limitMode, "cost_protection");
+    assert.equal(usage.burstLimit, 20);
+
+    const cached = await prepareRuntimeResearch({
+      settings: { search: { provider: "tavily", apiKey: "workspace-key", dailyLimit: 10 } },
+      text: "search the web latest runtime",
+      usagePath,
+      workspaceId: "usr_test",
+      feature: "test_followup",
+      fetch: async () => { throw new Error("duplicate query should use the cache"); }
+    });
+    assert.equal(cached.ok, true);
+    assert.equal(cached.cached, true);
+    const usageAfterCache = runtimeUsageSummary({ search: { dailyLimit: 10 } }, usagePath);
+    assert.equal(usageAfterCache.todaySearches, 1);
+
+    for (let index = 1; index <= 4; index += 1) {
+      const continued = await prepareRuntimeResearch({
+        settings: { search: { provider: "tavily", apiKey: "workspace-key", dailyLimit: 10 } },
+        text: "search the web task " + index,
+        usagePath,
+        workspaceId: "usr_test",
+        feature: "same_research_task",
+        fetch: fetchSearch
+      });
+      assert.equal(continued.ok, true);
+    }
+    const continuedUsage = runtimeUsageSummary({ search: { dailyLimit: 10 } }, usagePath);
+    assert.equal(continuedUsage.todaySearches, 5);
 
     const read = await executeTool(
       "web_read",
