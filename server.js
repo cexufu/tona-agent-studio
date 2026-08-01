@@ -6,11 +6,13 @@ const { execFile } = require("child_process");
 const { AsyncLocalStorage } = require("async_hooks");
 const {
   TOOL_CATALOG,
+  PLUGIN_CATALOG,
   normalizeRuntimeSettings,
   publicRuntimeSettings,
   executeTool
 } = require("./runtime/tool-runtime");
 const { WorkspaceFileStore, MAX_FILE_BYTES } = require("./runtime/workspace-files");
+const { HybridMemoryStore } = require("./runtime/memory-tools");
 const { prepareAgentToolResult } = require("./runtime/agent-tools");
 const {
   needsCapabilityPlanning,
@@ -322,7 +324,8 @@ function storagePaths() {
     runsDir: ROOT_RUNS_DIR,
     usagePath: path.join(DATA_DIR, "model-usage.jsonl"),
     toolUsagePath: path.join(DATA_DIR, "tool-usage.jsonl"),
-    filesDir: path.join(DATA_DIR, "files")
+    filesDir: path.join(DATA_DIR, "files"),
+    memoriesDir: path.join(DATA_DIR, "memories")
   };
   const directory = path.join(WORKSPACES_DIR, workspaceId);
   return {
@@ -330,12 +333,17 @@ function storagePaths() {
     runsDir: path.join(directory, "runs"),
     usagePath: path.join(directory, "model-usage.jsonl"),
     toolUsagePath: path.join(directory, "tool-usage.jsonl"),
-    filesDir: path.join(directory, "files")
+    filesDir: path.join(directory, "files"),
+    memoriesDir: path.join(directory, "memories")
   };
 }
 
 function workspaceFileStore() {
   return new WorkspaceFileStore(storagePaths().filesDir, activeWorkspaceId() || LEGACY_OWNER_ID);
+}
+
+function workspaceMemoryStore() {
+  return new HybridMemoryStore(storagePaths().memoriesDir, activeWorkspaceId() || LEGACY_OWNER_ID);
 }
 
 function decodeFileContent(body) {
@@ -1580,12 +1588,55 @@ function feishuChatText(text) {
     if (compact.at(-1) === line) continue;
     compact.push(line);
   }
-  const joined = compact.join("\n");
-  return joined.length > 4800 ? joined.slice(0, 4770) + "\n…（内容较长，可 @我要求展开）" : joined;
+  return compact.join("\n");
 }
+
+const FEISHU_POST_MAX_LINES = 20;
+const FEISHU_POST_MAX_CHARACTERS = 3500;
+const FEISHU_REPLY_PART_DELAY_MS = 250;
+
+function splitFeishuPostText(text) {
+  const sourceLines = feishuChatText(text).split("\n").filter(Boolean);
+  const lines = [];
+  for (const sourceLine of sourceLines) {
+    const characters = Array.from(sourceLine);
+    if (!characters.length) continue;
+    for (let offset = 0; offset < characters.length; offset += FEISHU_POST_MAX_CHARACTERS) {
+      lines.push(characters.slice(offset, offset + FEISHU_POST_MAX_CHARACTERS).join(""));
+    }
+  }
+
+  const chunks = [];
+  let current = [];
+  let currentCharacters = 0;
+  for (const line of lines) {
+    const lineCharacters = Array.from(line).length;
+    if (current.length && (current.length >= FEISHU_POST_MAX_LINES || currentCharacters + lineCharacters > FEISHU_POST_MAX_CHARACTERS)) {
+      chunks.push(current);
+      current = [];
+      currentCharacters = 0;
+    }
+    current.push(line);
+    currentCharacters += lineCharacters;
+  }
+  if (current.length) chunks.push(current);
+  return chunks.length ? chunks : [["已收到。"]];
+}
+
+function feishuPostContents(text, title = "") {
+  const chunks = splitFeishuPostText(text);
+  return chunks.map((lines, index) => {
+    const partTitle = chunks.length > 1
+      ? [String(title || "回复").slice(0, 64), `（${index + 1}/${chunks.length}）`].join("")
+      : String(title || "").slice(0, 80);
+    return { zh_cn: { title: partTitle, content: lines.map((line) => [{ tag: "text", text: line }]) } };
+  });
+}
+
 function feishuPostContent(text, title = "") {
-  const rows = feishuChatText(text).split("\n").filter(Boolean).slice(0, 24).map((line) => [{ tag: "text", text: line }]);
-  return { zh_cn: { title: String(title || "").slice(0, 80), content: rows.length ? rows : [[{ tag: "text", text: "已收到。" }]] } };
+  const content = feishuPostContents(text, title)[0];
+  content.zh_cn.title = String(title || "").slice(0, 80);
+  return content;
 }
 function groupMessageRequestsCollaboration(db, message, bot) {
   if (startsCollaborationTask(message.text)) return true;
@@ -1598,7 +1649,13 @@ function groupMessageRequestsCollaboration(db, message, bot) {
 
 
 async function replyFeishuMessage(settings, messageId, text) {
-  return replyFeishuMessagePayload(settings, messageId, "post", feishuPostContent(text));
+  const contents = feishuPostContents(text);
+  const responses = [];
+  for (let index = 0; index < contents.length; index += 1) {
+    if (index > 0) await new Promise((resolve) => setTimeout(resolve, FEISHU_REPLY_PART_DELAY_MS));
+    responses.push(await replyFeishuMessagePayload(settings, messageId, "post", contents[index]));
+  }
+  return responses.at(-1);
 }
 async function replyFeishuInteractiveCard(settings, messageId, card) {
   return replyFeishuMessagePayload(settings, messageId, "interactive", card);
@@ -2346,6 +2403,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       const settings = publicRuntimeSettings(db.settings?.runtime, maskSecret);
       return sendJson(res, 200, {
         settings,
+        plugins: PLUGIN_CATALOG,
         tools: TOOL_CATALOG,
         usage: runtimeUsageSummary(db.settings?.runtime, storagePaths().toolUsagePath)
       });
@@ -2398,8 +2456,9 @@ async function handleApiInWorkspace(req, res, pathname) {
       const execution = await executeTool(runtimeToolMatch[1], body.input || {}, {
         settings: db.settings?.runtime, workspaceId, authorizedWorkspaceId: workspaceId,
         idempotencyKey: String(req.headers["idempotency-key"] || body.idempotencyKey || "").slice(0, 120),
-        allowedRisks: body.confirmed === true ? ["read", "write"] : ["read"],
+        allowedRisks: body.confirmed === true ? ["read", "write", "execute"] : ["read"],
         fileStore: ["file_read", "artifact_generate"].includes(runtimeToolMatch[1]) ? workspaceFileStore() : undefined,
+        memoryStore: runtimeToolMatch[1].startsWith("memory_") ? workspaceMemoryStore() : undefined,
         audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
       });
       return sendJson(res, 200, execution);
