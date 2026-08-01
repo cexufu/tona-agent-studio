@@ -1,147 +1,140 @@
-﻿# TONA Agent Studio
+# TONA AI Harness
 
-TONA Agent Studio is a local, no-code multi-agent workspace for personal AI workflows.
+> 把模型、角色、技能、工具、记忆与飞书连接成一个可管理的个人 AI 工作系统。
 
-The first MVP focuses on:
+[在线体验](https://tona-agent-studio.onrender.com/) · [申请接入](#申请接入) · [能力概览](#现在可以做什么) · [安全与边界](#安全与边界)
 
-- managing multiple model providers, including OpenAI-compatible APIs
-- creating and editing AI roles from a web page
-- creating reusable multi-agent skills in Skill Center
-- running skills from pasted text
-- saving local run logs
+**当前阶段：Private Beta / 邀请制内测**
 
-It is intentionally local-first. Your API keys are stored in `data/studio.json` on this machine and are only shown as masked values in the UI.
+TONA 不是另一个聊天框。它是一套面向个人与小团队的 **AI Harness**：让不同大模型获得清晰角色、可复用技能、受控工具、连续记忆和飞书工作入口，并在同一套治理规则下协作与交付。
 
-## Quickstart
+```mermaid
+flowchart LR
+    U["用户与团队"] --> H["TONA AI Hub"]
+    H --> S["个人 AI Studio"]
+    H --> T["TeamFlow"]
+    S --> M["多模型"]
+    S --> A["AI 角色"]
+    S --> K["Skill Center"]
+    A --> R["Runtime 与工具"]
+    K --> R
+    R --> W["联网、文件、计算、文档"]
+    R --> F["飞书机器人"]
+    F --> C["受控多角色协作"]
+    T --> C
+```
+
+## 为什么是 AI Harness
+
+单独接入一个模型，只解决了“能回答”。真正进入日常工作，还需要处理更多问题：
+
+- **模型层**：OpenAI、DeepSeek、Kimi、豆包等模型如何按任务选择。
+- **角色层**：科研、日常、代码等助手如何保持稳定职责与表达方式。
+- **技能层**：研究、报告、文案和质量检查如何沉淀为可复用流程。
+- **工具层**：搜索、文件、计算、结构化数据和飞书文档如何安全调用。
+- **记忆层**：机器人如何理解群聊上下文，而不是每次从零开始。
+- **协作层**：多个机器人如何互相 `@`、讨论、收敛，并在上限内停止。
+- **治理层**：工作区、密钥、权限、确认操作和用量如何被隔离与管理。
+
+TONA 把这些层连接起来，让 AI 从“一个会聊天的模型”变成“可以配置、调用、协作和交付的数字工作伙伴”。
+
+## 现在可以做什么
+
+| 能力 | 当前支持 |
+| --- | --- |
+| 多模型接入 | OpenAI、DeepSeek、Kimi / Moonshot、豆包 / 火山方舟，以及 OpenAI-compatible API |
+| AI 角色 | 创建和编辑角色定位、目标、边界、风格、输出格式、模型与技能 |
+| Skill Center | 配置研究、报告、写作、审校等可复用技能和顺序工作流 |
+| 飞书机器人 | 一个飞书应用机器人绑定一个角色；统一公网回调，按工作区与 App ID 路由 |
+| 群聊记忆 | 读取近期会话、引用链和群内知识；未 `@` 的内容可进入上下文但不会触发回复 |
+| 多角色协作 | 机器人通过真实 `@` 交接任务，最多 5 个参与角色、10 条协作消息，并最终 `@` 发起人交付 |
+| 飞书文档 | 读取明确授权的文档；经确认后创建带标题、段落、列表和表格的飞书文档 |
+| Runtime 工具 | 联网搜索与网页读取、日期时间、数学、单位换算、统计和结构化表格处理 |
+| 工作区文件 | 上传、搜索、读取、版本、下载、重命名、删除及生成 Markdown / HTML / JSON / CSV |
+| TeamFlow | 团队邀请码、成员角色、需求、任务、提醒与协作空间 |
+| 用量治理 | 模型与 Runtime 调用摘要、错误记录和成本观察 |
+
+## 典型使用方式
+
+### 个人 AI 团队
+
+为科研、日常和代码工作分别配置角色。每个角色可以使用不同模型、技能和飞书机器人，同时共享受控的工具体系。
+
+### 飞书里的数字员工
+
+在单聊或群聊中 `@` 指定机器人发起任务。机器人可以读取当前对话上下文、调用工具、生成飞书文档，并在协作任务中 `@` 其他角色继续推进。
+
+### 研究与内容生产
+
+把材料、网页或工作区文件交给科研助手，完成检索、分析、审校和结构化交付；再由内容角色转成报告、文章或飞书文档。
+
+### 小团队协作
+
+通过 TONA AI Hub 登录个人工作区；需要团队协作时，使用 Team Key 加入 TeamFlow。个人模型密钥与机器人配置不会暴露给其他成员。
+
+## 从注册到飞书使用
+
+1. 登录 [TONA AI Hub](https://tona-agent-studio.onrender.com/)，进入自己的 AI Studio。
+2. 添加自己的模型 API Key，并测试连接。
+3. 选择默认角色或创建专属角色，绑定模型和技能。
+4. 在飞书开放平台创建应用机器人，并在 Studio 中填写 App ID、Secret、Verification Token 与 Encrypt Key。
+5. 把 Studio 生成的专属回调 URL 填入飞书“事件与回调”，订阅接收消息事件并发布应用版本。
+6. 在飞书中 `@机器人` 开始工作；复杂任务可明确要求多角色协作。
+
+> TONA 使用 BYOK（Bring Your Own Key）模式。模型费用由相应模型服务商按你的实际调用收取。
+
+## 安全与边界
+
+- **工作区隔离**：用户只能访问自己的模型、角色、机器人、文件和运行记录。
+- **密钥保护**：API Key 与应用 Secret 在界面中仅显示遮罩；配置 `TONA_SECRETS_KEY` 后加密落盘。
+- **明确触发**：飞书群聊默认只有真实 `@` 才触发回复，避免机器人干扰日常沟通。
+- **受控协作**：机器人可以互相 `@`，但参与者和消息轮次均有硬上限，防止无限循环。
+- **高影响操作确认**：创建文档等写入动作通过确认卡片执行，不静默修改用户资源。
+- **权限按需申请**：工具缺少飞书权限时，系统可返回能力说明与授权提示。
+
+## 产品结构
+
+| 模块 | 作用 |
+| --- | --- |
+| TONA AI Hub | 统一登录、个人工作区与团队入口 |
+| AI Studio | 管理模型、角色、技能、飞书机器人、文件和运行记录 |
+| Agent Runtime | 为角色提供工具调用、上下文、记忆与执行边界 |
+| Feishu Connector | 事件路由、消息回复、卡片、文档与多机器人协作 |
+| TeamFlow | 团队成员、需求、任务、提醒和交付管理 |
+
+## 正在继续升级
+
+- 更完整的飞书云文档、表格、日历和项目能力。
+- 更稳定的长期记忆、知识检索与上下文压缩。
+- 国内外搜索源的质量路由、引用和失败降级。
+- Skill Creator、测试评估和技能版本管理。
+- 独立实例、专属域名与组织级运维方案。
+
+## 申请接入
+
+TONA 当前采用邀请制和协助式接入，适合希望把个人 AI 或多机器人团队接入飞书的用户。
+
+- **在线入口**：[tona-agent-studio.onrender.com](https://tona-agent-studio.onrender.com/)
+- **微信咨询**：`hi342273281`
+- **可提供**：账号开通、模型接入、角色设计、飞书应用配置、多机器人协作规则与独立部署。
+
+## 开发与部署
+
+本仓库是 TONA 产品代码库。部署、飞书回调和运行维护说明位于 `docs/`。
+
+本地启动：
 
 ```bash
+npm install
 npm start
 ```
 
-Open:
+默认地址：`http://localhost:7357`
 
-```text
-http://localhost:7357
-```
+健康检查：`GET /api/health`
 
-## Model Providers
+## 使用与授权声明
 
-Open the **模型** page and add or edit providers.
+Copyright © TONA. All rights reserved.
 
-Built-in presets include:
-
-- OpenAI
-- DeepSeek
-- Kimi / Moonshot
-- Doubao / Volcengine Ark
-
-Each provider uses this shape:
-
-```json
-{
-  "name": "OpenAI",
-  "type": "openai_compatible",
-  "baseUrl": "https://api.openai.com/v1",
-  "apiKey": "sk-...",
-  "defaultModel": "gpt-4.1-mini",
-  "enabled": true
-}
-```
-
-For Doubao or Kimi, set the exact model name you have access to.
-
-## Agents
-
-Open the **角色** page to create or edit agents.
-
-Each agent has:
-
-- role
-- style
-- goals
-- guardrails
-- output format
-- provider and model
-- skill labels
-
-The current MVP turns these fields into a system prompt. It does not require prompt-file editing.
-
-## Skill Center
-
-Open **Skill Center** to define a reusable capability with trigger examples, an input type, enabled state, and ordered role steps.
-
-Use one step per line:
-
-```text
-researcher | Summarize the material and extract the core argument.
-critic | Identify weak logic and unsupported claims.
-editor | Produce a polished final memo.
-```
-
-## Run Logs
-
-Every Skill run is saved under:
-
-```text
-data/runs/
-```
-
-Inputs are not saved in full by default. The run log stores an input preview, step outputs, model metadata, status, and errors.
-
-## Current Limits
-
-- Feishu/Lark integration is not implemented yet.
-- Only OpenAI-compatible chat completion APIs are implemented.
-- Skill steps are sequential. The legacy `/api/workflows` endpoint remains available for compatibility.
-- There is no user account system.
-- API keys are stored locally but are not encrypted yet.
-
-## Suggested Next Milestones
-
-1. Add Feishu/Lark document read.
-2. Add write-back with explicit confirmation.
-3. Add provider-level cost, speed, and quality tags.
-4. Add workflow templates for research, content, career, and governance work.
-5. Add local key encryption.
-
-## One-Click Daily Use
-
-On Windows, double-click:
-
-```text
-Start-TONA.bat
-```
-
-This starts the local server and opens:
-
-```text
-http://localhost:7357
-```
-
-Use the **快速开始** page for the normal workflow:
-
-1. Choose a provider, usually DeepSeek for low-cost research work.
-2. Paste an API key. Saving automatically enables the provider.
-3. Optionally paste a Feishu custom bot webhook.
-4. Choose **科研信息分析** or **研究型内容生产**.
-5. Paste research material and click **保存并运行**.
-6. Click **发送结果到飞书** when you want to push the result to your Feishu group.
-
-The advanced pages, **模型 / 角色 / Skill Center / 飞书 / 记录**, are still available when you want to customize details.
-
-## Feishu App Bot Wizard
-
-The **飞书** page now supports two modes:
-
-- **方式 A：群自定义机器人 Webhook** for immediate result push to a Feishu group.
-- **方式 B：开放平台应用机器人** for a future @-able bot.
-
-For App Bot mode, TONA generates and handles:
-
-- callback endpoint: `/feishu/events`
-- URL verification challenge response
-- local event logging under `data/lark_events/`
-- App ID / App Secret storage and token test
-- recommended permission checklist
-
-Feishu cannot call `localhost`, so event subscription requires a public callback URL from a tunnel or deployment, for example `https://your-domain/feishu/events`.
+当前未提供开源许可。仓库可访问不代表授予复制、修改、分发、部署或商业使用权；产品接入与商业授权请通过上述联系方式咨询。
