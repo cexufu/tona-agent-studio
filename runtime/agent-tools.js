@@ -15,7 +15,9 @@ function deterministicToolRequest(text) {
   if (/(现在几点|当前时间|今天几号|当前日期|what time|current date|current time)/i.test(value)) return { toolId: "datetime_now", input: { timeZone: timeZone || "UTC" } };
   const expression = value.match(/^(?:请)?(?:帮我)?(?:计算|算一下|calculate)\s*[:：]?\s*([0-9eEpiPI+\-*/%^().,\sA-Za-z_]+)[。？?]?$/i)?.[1]?.trim();
   if (expression) return { toolId: "math_calculate", input: { expression } };
-  const conversion = value.match(/(?:把|将)?\s*(-?\d+(?:\.\d+)?)\s*([A-Za-z0-9_]+|[\u4e00-\u9fa5]+?)\s*(?:换算|转换|convert)?\s*(?:成|为|to)\s*([A-Za-z0-9_]+|[\u4e00-\u9fa5]+)/i);
+  const chineseConversion = value.match(/(?:^|[\s，。；：:])(?:把|将)\s*(-?\d+(?:\.\d+)?)\s*([A-Za-z0-9_]+|[\u4e00-\u9fa5]{1,8})\s*(?:换算|转换)\s*(?:成|为)\s*([A-Za-z0-9_]+|[\u4e00-\u9fa5]{1,8})(?=$|[\s，。；！？!?])/i);
+  const englishConversion = value.match(/(?:^|\s)convert\s+(-?\d+(?:\.\d+)?)\s*([A-Za-z0-9_]+)\s+to\s+([A-Za-z0-9_]+)(?=$|\s|[,.!?])/i);
+  const conversion = chineseConversion || englishConversion;
   if (conversion) return { toolId: "unit_convert", input: { value: Number(conversion[1]), from: UNIT_ALIASES[conversion[2]] || conversion[2], to: UNIT_ALIASES[conversion[3]] || conversion[3] } };
   return null;
 }

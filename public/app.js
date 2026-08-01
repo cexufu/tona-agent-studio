@@ -149,8 +149,9 @@ function renderRuntime() {
     "<p><strong>配置供应商：</strong>" + escapeHtml(settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>实际供应商：</strong>" + escapeHtml(settings.search?.activeProvider || settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>安全策略：</strong>只允许公开 HTTP/HTTPS；阻止 localhost、内网地址和超大页面。</p>";
+  const toolStatusLabels = { ready: "可用", authorization_required: "需要个人授权", permission_required: "需要飞书权限", planned: "规划中" };
   document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) =>
-    '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><span class="pill ' + (tool.status === "ready" ? "enabled" : "") + '">' + (tool.status === "ready" ? "可用" : "规划中") + '</span></div>'
+    '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><span class="pill ' + (tool.status === "ready" ? "enabled" : "") + '">' + escapeHtml(toolStatusLabels[tool.status] || tool.status || "未知") + '</span></div>'
   ).join("");
 }
 
@@ -186,7 +187,8 @@ async function refreshAssistantHealth() {
     const health = await api('/api/assistant-health');
     const labels = { ready: '\u8fd0\u884c\u6b63\u5e38', attention: '\u9700\u8981\u5904\u7406', setup_needed: '\u5c1a\u672a\u5c31\u7eea' };
     const stateClass = health.status === 'ready' ? 'enabled' : health.status === 'attention' ? 'error' : 'disabled';
-    const taskRows = (health.pendingTasks || []).map((task) => '<li><strong>' + escapeHtml(task.title) + '</strong><span>' + escapeHtml(task.status === 'awaiting_calendar_oauth' ? '\u7b49\u5f85\u65e5\u5386\u6388\u6743' : '\u7b49\u5f85\u4f60\u786e\u8ba4') + '</span></li>').join('');
+    const taskStatusLabels = { pending_confirmation: '\u7b49\u5f85\u4f60\u786e\u8ba4', awaiting_calendar_oauth: '\u7b49\u5f85\u65e5\u5386\u6388\u6743', scheduled: '\u5df2\u5b89\u6392', failed: '\u6267\u884c\u5931\u8d25' };
+    const taskRows = (health.pendingTasks || []).map((task) => '<li><strong>' + escapeHtml(task.title) + '</strong><span>' + escapeHtml(taskStatusLabels[task.status] || task.status) + '</span></li>').join('');
     const failure = health.replyFailures?.[0];
     box.innerHTML = '<div class="panel-heading"><h3>\u5728\u7ebf\u52a9\u7406\u72b6\u6001</h3><button id="refreshAssistantHealthButton" type="button">\u5237\u65b0\u72b6\u6001</button></div>' +
       '<div class="health-grid"><div><span class="pill ' + stateClass + '">' + labels[health.status] + '</span><p>\u5df2\u5c31\u7eea\u673a\u5668\u4eba\uff1a' + Number(health.botsReady || 0) + '</p><p>\u53ef\u7528\u6a21\u578b\uff1a' + escapeHtml((health.providersReady || []).join(' / ') || '\u65e0') + '</p></div>' +

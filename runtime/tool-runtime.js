@@ -1,6 +1,7 @@
 const dns = require("dns").promises;
 const net = require("net");
 const { deterministicTools } = require("./deterministic-tools");
+const { UNIVERSAL_CAPABILITIES } = require("./capability-planner");
 const { fileTools } = require("./workspace-files");
 const { createToolRegistry, publicToolDefinition, executeRegisteredTool } = require("./runtime-v2");
 
@@ -353,7 +354,19 @@ const plannedSchemas = {
   }
 };
 const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned").map((tool) => ({ ...tool, ...plannedSchemas[tool.id] }));
-TOOL_CATALOG.splice(0, TOOL_CATALOG.length, ...[...TOOL_REGISTRY.values()].map(publicToolDefinition), ...plannedTools);
+const registeredToolIds = new Set(TOOL_REGISTRY.keys());
+const orchestrationInputSchema = { type: "object", required: ["request"], properties: { request: { type: "string", minLength: 1, maxLength: 5000 } }, additionalProperties: false };
+const orchestrationOutputSchema = { type: "object", required: ["status"], properties: { status: { type: "string", enum: ["planned", "pending_confirmation", "authorization_required", "permission_required", "completed", "failed"] }, receipt: { type: "string" } }, additionalProperties: false };
+const orchestrationTools = UNIVERSAL_CAPABILITIES.filter((tool) => !registeredToolIds.has(tool.id)).map((tool) => ({
+  ...tool,
+  category: "orchestration",
+  approvalRisk: tool.risk,
+  risk: tool.risk === "read" ? "read" : tool.id === "multi_agent_collaboration" ? "execute" : "write",
+  policy: { timeoutMs: 10000, retries: 0, idempotent: false, rateLimit: { maxCalls: 30, windowMs: 60000 } },
+  inputSchema: orchestrationInputSchema,
+  outputSchema: orchestrationOutputSchema
+}));
+TOOL_CATALOG.splice(0, TOOL_CATALOG.length, ...[...TOOL_REGISTRY.values()].map(publicToolDefinition), ...orchestrationTools, ...plannedTools);
 
 async function executeTool(name, input, context = {}) {
   return executeRegisteredTool(TOOL_REGISTRY, name, input, context);

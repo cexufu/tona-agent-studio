@@ -13,6 +13,12 @@ const {
 const { WorkspaceFileStore, MAX_FILE_BYTES } = require("./runtime/workspace-files");
 const { prepareAgentToolResult } = require("./runtime/agent-tools");
 const {
+  needsCapabilityPlanning,
+  fallbackCapabilityPlan,
+  plannerPrompt,
+  parseCapabilityPlan
+} = require("./runtime/capability-planner");
+const {
   runtimeUsageSummary,
   writeToolEvent,
   prepareRuntimeResearch
@@ -854,6 +860,33 @@ async function callOpenAICompatible(provider, agent, messages) {
   });
 }
 
+async function planFeishuCapabilities(db, bot, message) {
+  const agent = db.agents.find((item) => item.id === bot.agentId) || db.agents.find((item) => item.id === "daily_assistant") || db.agents[0];
+  const provider = db.providers.find((item) => item.id === agent?.providerId) || firstReadyProvider(db);
+  const roster = (db.agents || []).map((item) => ({ ...item, hasFeishuBot: Boolean(larkBotForAgent(db, item.id)) }));
+  const fallback = fallbackCapabilityPlan({ text: message.text, agents: roster, currentAgentId: bot.agentId, now: Date.now() });
+  if (!needsCapabilityPlanning(message.text) || !agent || !provider || !provider.enabled || !provider.apiKey) return fallback;
+  try {
+    const planningAgent = { ...agent, name: agent.name + " Capability Planner", temperature: 0.1 };
+    const result = await callOpenAICompatible(provider, planningAgent, [
+      { role: "system", content: plannerPrompt({ text: message.text, agents: roster, currentAgentId: bot.agentId, timeZone: db.settings?.timeZone || "UTC", now: new Date().toISOString() }) },
+      { role: "user", content: "Return the JSON action plan now." }
+    ]);
+    const modelPlan = parseCapabilityPlan(result.content, { validAgentIds: roster.filter((item) => item.hasFeishuBot).map((item) => item.id), now: Date.now() });
+    const merged = []; const seen = new Set();
+    for (const action of [...fallback.actions, ...modelPlan.actions]) {
+      const key = action.type + ":" + (action.capabilityId || "");
+      if (!seen.has(key)) { seen.add(key); merged.push(action); }
+      if (merged.length >= 3) break;
+    }
+    writeToolEvent(storagePaths().toolUsagePath, { at: new Date().toISOString(), feature: "capability_planner", status: "planned", agentId: bot.agentId, actions: merged.map((action) => action.type) });
+    return { ...modelPlan, intent: merged.length ? "action" : "reply", actions: merged };
+  } catch (error) {
+    writeToolEvent(storagePaths().toolUsagePath, { at: new Date().toISOString(), feature: "capability_planner", status: "fallback", error: String(error?.message || error).slice(0, 500) });
+    return fallback;
+  }
+}
+
 function usageTokens(usage) {
   const inputTokens = Number(usage?.prompt_tokens ?? usage?.input_tokens ?? 0) || 0;
   const outputTokens = Number(usage?.completion_tokens ?? usage?.output_tokens ?? 0) || 0;
@@ -1672,7 +1705,7 @@ async function runServerManagedCollaboration(db, task, message, sourceBot) {
     }
     let content = "";
     try {
-      content = await runAgentReply(db, agentId, collaborationPrompt(task, message, db, agentId, groupContext));
+      content = await runAgentReply(db, agentId, collaborationPrompt(task, message, db, agentId, groupContext), { enableTools: true, feature: "feishu_collaboration" });
     } catch (error) {
       content = "本轮模型调用失败：" + error.message;
     }
@@ -1710,6 +1743,24 @@ function createAssistantTask(db, payload) {
   const task = { id: 'task_' + crypto.randomUUID().slice(0, 12), status: 'pending_confirmation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...payload };
   const tasks = assistantTaskEntries(db); tasks.push(task); db.settings.assistantTasks = tasks.slice(-300); writeDb(db); return task;
 }
+function safeTimeZone(value) { try { new Intl.DateTimeFormat('zh-CN', { timeZone: value }).format(); return value; } catch { return 'UTC'; } }
+function scheduledReminderTask(db, message, bot, action) {
+  return createAssistantTask(db, { type: 'scheduled_reminder', title: String(action.reminderText || '飞书提醒').slice(0, 100), reminderText: String(action.reminderText || '你设置的提醒时间到了。').slice(0, 500), runAt: action.runAt, timeZone: safeTimeZone(db.settings?.timeZone || 'UTC'), requestedBy: message.senderId || '', chatId: message.chatId || '', messageId: message.messageId || '', botId: bot?.id || '', botAppId: bot?.appId || '', workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, attempts: 0 });
+}
+function scheduledReminderCard(task) {
+  const displayTime = new Date(task.runAt).toLocaleString('zh-CN', { timeZone: task.timeZone, hour12: false });
+  return { config:{wide_screen_mode:true}, header:{title:{tag:'plain_text',content:'TONA 定时提醒待确认'},template:'blue'}, elements:[
+    {tag:'div',text:{tag:'lark_md',content:'**提醒内容：** '+task.reminderText+'\n\n**执行时间：** '+displayTime+'（'+task.timeZone+'）'}},
+    {tag:'note',elements:[{tag:'plain_text',content:'确认后任务会持久化保存。到期时由当前机器人主动发送一次消息；服务重启不会清除已保存任务。'}]},
+    {tag:'action',actions:[{tag:'button',text:{tag:'plain_text',content:'确认设置提醒'},type:'primary',value:{source:'tona_scheduled_reminder',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'approve'}},{tag:'button',text:{tag:'plain_text',content:'取消'},type:'default',value:{source:'tona_scheduled_reminder',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'reject'}}]}
+  ]};
+}
+function collaborationPlanFromCapabilityAction(db, bot, action) {
+  const available = new Set(allLarkBots(db).map((item) => item.agentId));
+  const selected = [...new Set([bot.agentId, ...(action.targetAgentIds || [])])].filter((id) => available.has(id)).slice(0, COLLABORATION_MAX_PARTICIPANTS);
+  if (selected.length < 2) return null;
+  return { coordinatorAgentId: bot.agentId, participantAgentIds: selected, writerAgentId: selected[selected.length - 1], rounds: Math.min(3, Math.max(1, Number(action.rounds) || 2)) };
+}
 function wantsCalendarAction(text) { return /(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u5165|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88).{0,12}(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386)|(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386).{0,12}(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88)/u.test(String(text || '')); }
 function calendarTaskFromText(text) { const source = String(text || '').trim(); const title = source.replace(/^(?:\u8bf7)?(?:\u5e2e\u6211)?(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u4e00\u4e2a|\u5efa\u4e00\u4e2a)(?:\u4f1a\u8bae|\u4f1a\u8bae\u65e5\u7a0b|\u65e5\u7a0b)[\uff1a:\s]*/u, '').trim() || source; return { title: title.slice(0,100), source }; }
 function calendarTaskCard(task) { return { config:{wide_screen_mode:true}, header:{title:{tag:'plain_text',content:'TONA \u65e5\u7a0b\u5f85\u786e\u8ba4'},template:'blue'}, elements:[
@@ -1718,7 +1769,7 @@ function calendarTaskCard(task) { return { config:{wide_screen_mode:true}, heade
   {tag:'action',actions:[{tag:'button',text:{tag:'plain_text',content:'\u786e\u8ba4\u7ee7\u7eed\u5904\u7406'},type:'primary',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'approve'}},{tag:'button',text:{tag:'plain_text',content:'\u6682\u4e0d\u5b89\u6392'},type:'default',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'reject'}}]}
 ]}; }
 function calendarTaskResultPost(task) { return feishuPostContent('\u65e5\u7a0b\u4efb\u52a1\u5df2\u8bb0\u5f55\uff1a'+task.title+'\n\n\u5f53\u524d\u72b6\u6001\uff1a\u7b49\u5f85\u4e2a\u4eba\u65e5\u5386\u6388\u6743\u63a5\u5165\u3002\n\n\u4f60\u53ef\u7ee7\u7eed\u8865\u5145\u53c2\u4f1a\u4eba\u3001\u65f6\u95f4\u7a97\u53e3\u548c\u4f1a\u8bae\u65f6\u957f\uff1bTONA \u4f1a\u5728\u6388\u6743\u5b8c\u6210\u540e\u751f\u6210\u5019\u9009\u65f6\u95f4\u5e76\u518d\u6b21\u8bf7\u4f60\u786e\u8ba4\u3002','\u65e5\u7a0b\u52a9\u7406'); }
-function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); return {status:!enabledBots.length||!providersReady.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:providersReady.map((provider)=>provider.name),replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title,status:item.status,updatedAt:item.updatedAt}))}; }
+function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth','scheduled','failed'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); return {status:!enabledBots.length||!providersReady.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:providersReady.map((provider)=>provider.name),replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title,status:item.status,updatedAt:item.updatedAt}))}; }
 function documentRequestEntries(db) {
   db.settings ||= {};
   db.settings.documentRequests = Array.isArray(db.settings.documentRequests) ? db.settings.documentRequests : [];
@@ -1908,6 +1959,18 @@ function workspaceDbExists(workspaceId) {
 }
 function handleFeishuCardAction(eventBody) {
   const value = cardActionValue(eventBody);
+  if (value.source === 'tona_scheduled_reminder' && value.taskId) {
+    const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID; const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
+    if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast('warning','该提醒已经过期或不属于当前工作区。');
+    const db=workspaceContext.run({workspaceId:requestedWorkspaceId},()=>readDb()); const task=assistantTaskEntries(db).find((item)=>item.id===value.taskId&&item.type==='scheduled_reminder');
+    if (!task || task.workspaceId !== requestedWorkspaceId) return skillRequestToast('warning','该提醒已经过期或不属于当前工作区。');
+    const incomingAppId=eventBody?.header?.app_id||eventBody?.app_id||''; if(task.botAppId&&task.botAppId!==incomingAppId)return skillRequestToast('warning','请使用原飞书机器人确认该提醒。');
+    const operatorId=cardOperatorId(eventBody); if(task.requestedBy&&operatorId&&task.requestedBy!==operatorId)return skillRequestToast('warning','只有发起提醒的用户可以确认。');
+    if(task.status!=='pending_confirmation')return skillRequestToast('info','该提醒已经处理：'+task.status+'。');
+    task.updatedAt=new Date().toISOString(); task.approvedBy=operatorId||task.requestedBy||'';
+    task.status=value.action==='reject'?'cancelled':'scheduled'; workspaceContext.run({workspaceId:requestedWorkspaceId},()=>writeDb(db));
+    return value.action==='reject' ? skillRequestToast('info','已取消，不会发送提醒。') : skillRequestToast('success','提醒已设置，到期后机器人会主动发送消息。');
+  }
   if (value.source === 'tona_calendar_plan' && value.taskId) {
     const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID; const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
     if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast('warning','\u8be5\u65e5\u7a0b\u8bf7\u6c42\u5df2\u8fc7\u671f\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5de5\u4f5c\u533a\u3002');
@@ -1966,6 +2029,8 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
   if (isHumanSender) rememberGroupKnowledge(db, message);
   let task = null;
   let conversation = null;
+  let capabilityPlan = null;
+  let plannedCollaborationPlan = null;
   if (message.senderType === "bot") {
     conversation = message.botConversation;
     if (!policy.enabled || !policy.allowBotHandoffs || !conversation) return;
@@ -1984,19 +2049,41 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, capabilityCard(request));
       return;
     }
-    if (wantsFeishuDocumentDelivery(message.text)) {
-      const request = createDocumentDeliveryRequest(db, message, bot);
+    capabilityPlan = await planFeishuCapabilities(db, bot, message);
+    const reminderAction = capabilityPlan.actions.find((item) => item.type === 'schedule_reminder');
+    if (reminderAction) {
+      const reminder = scheduledReminderTask(db, message, bot, reminderAction);
+      await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, scheduledReminderCard(reminder));
+      return;
+    }
+    const documentAction = capabilityPlan.actions.find((item) => item.type === 'feishu_document_create');
+    if (documentAction || wantsFeishuDocumentDelivery(message.text)) {
+      const plannedMessage = documentAction?.task ? { ...message, text: documentAction.task } : message;
+      const request = createDocumentDeliveryRequest(db, plannedMessage, bot);
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, documentDeliveryCard(request));
       return;
     }
-    if (wantsCalendarAction(message.text)) {
+    const requestedCapability = capabilityPlan.actions.find((item) => item.type === 'request_capability');
+    if (requestedCapability) {
+      const capabilityDefinition = FEISHU_CAPABILITY_REQUESTS.find((item) => item.id === requestedCapability.capabilityId);
+      if (capabilityDefinition) {
+        const request = createFeishuSkillRequest(db, capabilityDefinition, message, bot);
+        await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, capabilityCard(request));
+        return;
+      }
+    }
+    const calendarAction = capabilityPlan.actions.find((item) => item.type === 'feishu_calendar_plan');
+    if (calendarAction || wantsCalendarAction(message.text)) {
       const calendar=calendarTaskFromText(message.text);
       const task=createAssistantTask(db,{type:'calendar',title:calendar.title,sourceText:calendar.source,requestedBy:message.senderId||'',chatId:message.chatId||'',messageId:message.messageId||'',botId:bot?.id||'',botAppId:bot?.appId||'',workspaceId:activeWorkspaceId()||LEGACY_OWNER_ID});
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot),message.messageId,calendarTaskCard(task));
       return;
     }
     const decisionMakerAllowed = !policy.decisionMakerOpenIds.length || policy.decisionMakerOpenIds.includes(message.senderId);
-    const plan = message.chatType === "group" && groupMessageRequestsCollaboration(db, message, bot) ? collaborationPlanFromMessage(db, message, bot) : null;
+    const collaborationAction = capabilityPlan?.actions.find((item) => item.type === 'multi_agent_collaboration');
+    plannedCollaborationPlan = collaborationAction ? collaborationPlanFromCapabilityAction(db, bot, collaborationAction) : null;
+    const explicitCollaborationPlan = message.chatType === "group" && groupMessageRequestsCollaboration(db, message, bot) ? collaborationPlanFromMessage(db, message, bot) : null;
+    const plan = message.chatType === "group" ? (explicitCollaborationPlan || plannedCollaborationPlan) : null;
     const canStart = message.chatType === "group" && policy.enabled && decisionMakerAllowed && Boolean(plan) && !collaborationTaskAlreadyStarted(db, message.messageId);
     if (canStart) {
       task = createCollaborationTask(db, message, bot, plan);
@@ -2584,6 +2671,41 @@ const server = http.createServer((req, res) => {
   }
 });
 
+function assistantSchedulerWorkspaceIds() {
+  const ids = fs.existsSync(WORKSPACES_DIR) ? fs.readdirSync(WORKSPACES_DIR, { withFileTypes: true }).filter((entry) => entry.isDirectory() && isValidWorkspaceId(entry.name)).map((entry) => entry.name) : [];
+  return [...new Set([...(fs.existsSync(ROOT_DB_PATH) ? [''] : []), ...ids])];
+}
+async function deliverDueAssistantTasks() {
+  const now = Date.now();
+  for (const workspaceId of assistantSchedulerWorkspaceIds()) {
+    await workspaceContext.run(workspaceId ? { workspaceId } : {}, async () => {
+      const db = readDb(); const due = assistantTaskEntries(db).filter((item) => item.type === 'scheduled_reminder' && item.status === 'scheduled' && Date.parse(item.runAt) <= now).slice(0, 20);
+      for (const task of due) {
+        task.status = 'sending'; task.updatedAt = new Date().toISOString(); writeDb(db);
+        const bot = (db.settings?.larkBots || []).find((item) => item.id === task.botId && item.enabled !== false);
+        try {
+          if (!bot) throw new Error('The linked Feishu bot is no longer configured.');
+          const post = feishuPostContent(task.reminderText, 'TONA 定时提醒');
+          if (task.requestedBy) post.zh_cn.content.unshift([{tag:'at',user_id:task.requestedBy,user_name:'任务发起人'},{tag:'text',text:' 你设置的提醒时间到了。'}]);
+          await sendFeishuMessageToChat(larkBotToAppSettings(bot), task.chatId, 'post', post);
+          task.status = 'sent'; task.sentAt = new Date().toISOString(); task.updatedAt = task.sentAt; writeDb(db);
+        } catch (error) {
+          task.attempts = Number(task.attempts || 0) + 1; task.lastError = String(error?.message || error).slice(0, 500); task.updatedAt = new Date().toISOString();
+          if (task.attempts >= 3) task.status = 'failed';
+          else { task.status = 'scheduled'; task.runAt = new Date(Date.now() + 60_000).toISOString(); }
+          writeDb(db);
+        }
+      }
+    });
+  }
+}
+function startAssistantScheduler() {
+  const check = () => deliverDueAssistantTasks().catch(logServerError);
+  const intervalMs = Math.max(1000, Number(process.env.ASSISTANT_SCHEDULER_INTERVAL_MS) || 15_000);
+  setTimeout(check, Math.min(2000, intervalMs)).unref?.(); const timer = setInterval(check, intervalMs); timer.unref?.();
+}
+
 server.listen(PORT, () => {
+  startAssistantScheduler();
   console.log(`TONA Agent Studio is running at http://localhost:${PORT}`);
 });
