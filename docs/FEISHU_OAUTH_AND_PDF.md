@@ -3,11 +3,11 @@
 ## 飞书 OAuth 配置
 
 1. 在飞书开放平台打开 TONA 使用的企业自建应用。
-2. 在“安全设置 / 重定向 URL”中加入工具页返回的 `redirectUri`。生产环境示例：
+2. 在“安全设置 / 重定向 URL”中加入当前“飞书角色机器人 / Agent”配置区生成的 `redirectUri`。生产环境示例：
    `https://tona-agent-studio.onrender.com/feishu/oauth/callback/<workspace-id>`
 3. 在“权限管理”申请所需权限。日历至少需要 `calendar:calendar:readonly`；写入日程需要 `calendar:calendar`。TONA 会同时申请 `offline_access`，用于获得 refresh token。
 4. 创建并发布应用版本，并确保应用已安装到目标企业。
-5. 回到 TONA 的 Tools / Plugins 页面，在“日历与日程”旁点击“开始授权”。完成飞书同意页后，回调会把 user access token 和 refresh token 加密保存到当前 workspace。
+5. 回到 TONA 的飞书角色机器人配置区，选中绑定该 Agent 的机器人，然后点击“授权当前 Agent 的飞书个人能力”。Tools / Plugins 只显示能力状态，不承载 OAuth 回调配置。完成飞书同意页后，回调会把 user access token 和 refresh token 加密保存到当前 workspace。
 
 建议在 Render 中配置独立的 `TONA_OAUTH_STATE_KEY`（至少 24 个随机字符）。若未配置，TONA 会从 `TONA_SECRETS_KEY` 或当前飞书 App Secret 派生签名密钥。生产环境必须继续配置 `TONA_SECRETS_KEY`，用于 token 静态加密。
 

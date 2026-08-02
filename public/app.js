@@ -152,26 +152,12 @@ function renderRuntime() {
   const toolStatusLabels = { ready: "\u53ef\u7528", authorized: "\u5df2\u6388\u6743", authorization_required: "\u9700\u8981\u4e2a\u4eba\u6388\u6743", permission_required: "\u9700\u8981\u98de\u4e66\u6743\u9650", configuration_required: "\u9700\u914d\u7f6e", planned: "\u89c4\u5212\u4e2d" };
   document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) => {
     const action = tool.action || {};
-    const actionHtml = action.type === "feishu_oauth"
-      ? '<button type="button" data-runtime-oauth="' + escapeHtml(tool.id) + '">' + escapeHtml(action.label || "\u5f00\u59cb\u6388\u6743") + '</button>'
-      : action.type === "feishu_admin"
-        ? '<a class="button-link" target="_blank" rel="noopener" href="' + escapeHtml(action.url) + '">' + escapeHtml(action.label || "\u98de\u4e66\u5f00\u653e\u5e73\u53f0") + '</a>' : "";
+    const actionHtml = action.type === "feishu_admin"
+      ? '<a class="button-link" target="_blank" rel="noopener" href="' + escapeHtml(action.url) + '">' + escapeHtml(action.label || "\u98de\u4e66\u5f00\u653e\u5e73\u53f0") + '</a>' : "";
     return '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><div class="button-row"><span class="pill ' + (["ready", "authorized"].includes(tool.status) ? "enabled" : "") + '">' + escapeHtml(toolStatusLabels[tool.status] || tool.status || "\u672a\u77e5") + '</span>' + actionHtml + '</div></div>';
   }).join("");
 }
 
-async function handleRuntimeToolAction(event) {
-  const button = event.target.closest("[data-runtime-oauth]");
-  if (!button) return;
-  button.disabled = true;
-  try {
-    const result = await api("/api/feishu/oauth/start", { method: "POST", body: JSON.stringify({ toolId: button.dataset.runtimeOauth }) });
-    window.location.assign(result.authorizationUrl);
-  } catch (error) {
-    toast(error.message);
-    button.disabled = false;
-  }
-}
 async function saveRuntime() {
   const result = await api("/api/runtime", { method: "POST", body: JSON.stringify(runtimeFormPayload()) });
   state.runtime = { ...state.runtime, ...result, tools: state.runtime.tools };
@@ -362,8 +348,61 @@ function renderLarkBotForm() {
     encryptKey: bot.encryptKey || "",
     enabled: String(bot.enabled !== false)
   });
+  renderFeishuOauthPanel(bot);
 }
 
+async function renderFeishuOauthPanel(bot = {}) {
+  const redirect = document.querySelector("#feishuOauthRedirectUrl");
+  const status = document.querySelector("#feishuOauthStatus");
+  const start = document.querySelector("#startFeishuOauthButton");
+  const copy = document.querySelector("#copyFeishuOauthRedirectButton");
+  if (!redirect || !status || !start || !copy) return;
+  if (!bot.id) {
+    redirect.textContent = "\u4fdd\u5b58\u673a\u5668\u4eba\u540e\u751f\u6210";
+    status.textContent = "\u8bf7\u5148\u4fdd\u5b58 App ID / Secret \u548c\u7ed1\u5b9a Agent\u3002";
+    start.disabled = true;
+    copy.disabled = true;
+    return;
+  }
+  start.disabled = true;
+  copy.disabled = true;
+  status.textContent = "\u6b63\u5728\u8bfb\u53d6\u5f53\u524d Agent \u7684\u6388\u6743\u72b6\u6001\u2026";
+  try {
+    const config = await api("/api/feishu/oauth/config?botId=" + encodeURIComponent(bot.id));
+    if (document.querySelector("#larkBotForm")?.elements.id.value !== bot.id) return;
+    state.feishuOauthConfig = config;
+    redirect.textContent = config.redirectUri;
+    const users = (config.authorizations || []).map((item) => item.name || item.userOpenId).filter(Boolean);
+    status.textContent = config.connected ? "\u5df2\u6388\u6743\uff1a" + users.join("\u3001") : "\u5c1a\u672a\u6388\u6743\u4e2a\u4eba\u98de\u4e66\u80fd\u529b\u3002";
+    start.textContent = config.connected ? "\u91cd\u65b0\u6388\u6743\u5f53\u524d Agent" : "\u6388\u6743\u5f53\u524d Agent \u7684\u98de\u4e66\u4e2a\u4eba\u80fd\u529b";
+    start.disabled = false;
+    copy.disabled = false;
+  } catch (error) {
+    redirect.textContent = "\u65e0\u6cd5\u751f\u6210";
+    status.textContent = error.message;
+  }
+}
+
+async function startFeishuOauthForCurrentBot() {
+  const botId = document.querySelector("#larkBotForm")?.elements.id.value;
+  if (!botId) return toast("\u8bf7\u5148\u4fdd\u5b58\u5f53\u524d\u89d2\u8272\u673a\u5668\u4eba\u3002");
+  const button = document.querySelector("#startFeishuOauthButton");
+  button.disabled = true;
+  try {
+    const result = await api("/api/feishu/oauth/start", { method: "POST", body: JSON.stringify({ botId }) });
+    window.location.assign(result.authorizationUrl);
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+}
+
+async function copyFeishuOauthRedirect() {
+  const value = state.feishuOauthConfig?.redirectUri || "";
+  if (!value) return toast("\u8bf7\u5148\u4fdd\u5b58\u5e76\u9009\u4e2d\u89d2\u8272\u673a\u5668\u4eba\u3002");
+  await navigator.clipboard.writeText(value);
+  toast("OAuth \u56de\u8c03 URL \u5df2\u590d\u5236\u3002");
+}
 function newLarkBot() {
   state.selectedLarkBotId = null;
   const form = document.querySelector("#larkBotForm");
@@ -380,6 +419,7 @@ function newLarkBot() {
     enabled: "true"
   });
   renderLarkBots();
+  renderFeishuOauthPanel({});
 }
 
 async function saveLarkBot(event) {
@@ -855,7 +895,6 @@ function bindEvents() {
   $("#sendToLarkButton").addEventListener("click", sendToLark);
   bindIfPresent("#saveRuntimeButton", "click", saveRuntime);
   bindIfPresent("#testRuntimeButton", "click", testRuntime);
-  bindIfPresent("#runtimeToolCatalog", "click", handleRuntimeToolAction);
   bindIfPresent("#providerForm", "submit", saveProvider);
   bindIfPresent("#agentForm", "submit", saveAgent);
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);
@@ -869,6 +908,8 @@ function bindEvents() {
   bindIfPresent("#newLarkBotButton", "click", newLarkBot);
   bindIfPresent("#testLarkAppButton", "click", testLarkApp);
   bindIfPresent("#testLarkBotButton", "click", testLarkBot);
+  bindIfPresent("#startFeishuOauthButton", "click", startFeishuOauthForCurrentBot);
+  bindIfPresent("#copyFeishuOauthRedirectButton", "click", copyFeishuOauthRedirect);
   bindIfPresent("#testLarkButton", "click", testLark);
   bindIfPresent("#testProviderButton", "click", testProvider);
   bindIfPresent("#refreshAssistantHealthButton", "click", refreshAssistantHealth);

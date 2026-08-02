@@ -392,6 +392,13 @@
                 <label class="span-2">App ID<input name="appId" placeholder="cli_xxx" required /></label>
                 <label class="span-2">App Secret<input name="appSecret" type="password" placeholder="留空则保留原 secret" /></label>
                 <label class="span-2">公网回调 URL<input name="publicCallbackUrl" placeholder="同一个 URL 可以给所有机器人用" /></label>
+                <div class="span-2 mode-note" id="feishuOauthPanel">
+                  <strong>飞书个人 OAuth（跟随当前角色机器人配置）</strong>
+                  <p>先保存机器人。把下面的 OAuth 回调 URL 配置到该飞书应用的安全设置，然后在这里授权个人日历。</p>
+                  <div class="copy-row"><label>OAuth 回调 URL</label><code id="feishuOauthRedirectUrl">保存机器人后生成</code><button id="copyFeishuOauthRedirectButton" type="button">复制</button></div>
+                  <div id="feishuOauthStatus" class="meta">尚未读取授权状态。</div>
+                  <button id="startFeishuOauthButton" type="button">授权当前 Agent 的飞书个人能力</button>
+                </div>
                 <label class="span-2">Verification Token<input name="verificationToken" placeholder="飞书事件订阅页面里的 Verification Token" /></label>
                 <label class="span-2">Encrypt Key<input name="encryptKey" type="password" placeholder="飞书事件加密的 Encrypt Key" /></label>
                 <label>启用<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>

@@ -1253,8 +1253,9 @@ function publicRequestOrigin(req) {
 
 function oauthBot(db, botId = "") {
   const bots = (db.settings?.larkBots || []).filter((item) => item.enabled !== false && item.appId && item.appSecret);
-  const selected = (botId && bots.find((item) => item.id === botId)) || bots[0];
+  const selected = botId ? bots.find((item) => item.id === botId) : bots[0];
   if (selected) return selected;
+  if (botId) throw Object.assign(new Error("The selected Feishu Agent bot is missing, disabled, or not fully configured."), { code: "FEISHU_BOT_NOT_READY", statusCode: 404 });
   if (db.settings?.larkAppId && db.settings?.larkAppSecret) return { id: "legacy", appId: db.settings.larkAppId, appSecret: db.settings.larkAppSecret, enabled: true };
   throw Object.assign(new Error("Configure an enabled Feishu app (App ID and App Secret) before starting personal authorization."), { code: "FEISHU_APP_REQUIRED", statusCode: 409 });
 }
@@ -1282,8 +1283,8 @@ function runtimeToolCatalog(db) {
     if (tool.id === "feishu_calendar_plan") return {
       ...tool,
       status: calendarAuthorized ? "authorized" : "authorization_required",
-      description: calendarAuthorized ? "Personal Feishu calendar authorization is connected; each actual calendar write still requires confirmation." : tool.description,
-      action: { type: "feishu_oauth", label: calendarAuthorized ? "Reauthorize" : "Start authorization", endpoint: "/api/feishu/oauth/start" }
+      description: calendarAuthorized ? "Personal Feishu calendar authorization is connected; each actual calendar write still requires confirmation." : tool.description
+
     };
     if (tool.status === "permission_required") return { ...tool, action: { type: "feishu_admin", label: "Open Feishu console", url: "https://open.feishu.cn/app" } };
     return tool;
@@ -2489,6 +2490,20 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     if (req.method === "GET" && pathname === "/api/model-usage") {
       return sendJson(res, 200, modelUsageSummary());
+    }
+    if (req.method === "GET" && pathname === "/api/feishu/oauth/config") {
+      const db = readDb();
+      const requestUrl = new URL(req.url, "http://localhost");
+      const bot = oauthBot(db, String(requestUrl.searchParams.get("botId") || ""));
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const origin = publicRequestOrigin(req);
+      const authorizations = activeFeishuAuthorizations(db).filter((item) => item.botId === bot.id).map(publicAuthorization);
+      return sendJson(res, 200, {
+        botId: bot.id,
+        redirectUri: origin + "/feishu/oauth/callback/" + encodeURIComponent(workspaceId),
+        connected: authorizations.length > 0,
+        authorizations
+      });
     }
     if (req.method === "GET" && pathname === "/api/feishu/oauth/status") {
       const db = readDb();

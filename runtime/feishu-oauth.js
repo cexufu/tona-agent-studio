@@ -25,7 +25,7 @@ function verifyOauthState(state, secret, now = Date.now()) {
   if (!body || !signature || extra) throw Object.assign(new Error("Invalid Feishu OAuth state."), { code: "FEISHU_OAUTH_STATE_INVALID", statusCode: 400 });
   const expected = crypto.createHmac("sha256", requireStateSecret(secret)).update(body).digest();
   const actual = fromBase64url(signature);
-  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) throw Object.assign(new Error("Feishu OAuth state signature mismatch."), { code: "FEISHU_OAUTH_STATE_INVALID", statusCode: 400 });
+  if (base64url(actual) !== signature || actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) throw Object.assign(new Error("Feishu OAuth state signature mismatch."), { code: "FEISHU_OAUTH_STATE_INVALID", statusCode: 400 });
   let payload;
   try { payload = JSON.parse(fromBase64url(body).toString("utf8")); }
   catch { throw Object.assign(new Error("Invalid Feishu OAuth state payload."), { code: "FEISHU_OAUTH_STATE_INVALID", statusCode: 400 }); }

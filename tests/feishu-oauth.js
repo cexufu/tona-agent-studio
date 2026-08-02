@@ -30,5 +30,11 @@ const { signOauthState, verifyOauthState, createAuthorizationUrl, exchangeAuthor
   const user = await getFeishuUserInfo(exchanged.access_token, { fetch: fakeFetch });
   assert.equal(user.open_id, "ou_test");
   assert.equal(calls.length, 3);
+  const html = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "index.html"), "utf8");
+  const appScript = require("fs").readFileSync(require("path").join(__dirname, "..", "public", "app.js"), "utf8");
+  assert(html.includes('id="feishuOauthPanel"'));
+  assert(html.includes('id="startFeishuOauthButton"'));
+  assert(appScript.includes('/api/feishu/oauth/config?botId='));
+  assert(!appScript.includes('data-runtime-oauth'), "Tools must not own the Feishu OAuth callback flow");
   console.log("Feishu OAuth unit test passed: signed state, tamper/expiry rejection, consent URL, code exchange, refresh rotation, and user identity.");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -45,7 +45,13 @@ async function ready() {
     await ready();
     const saved = await request("/api/lark-bots", { method: "POST", body: JSON.stringify({ name: "OAuth bot", appId: "cli_oauth_test", appSecret: "feishu-oauth-test-secret", agentId: "daily_assistant", enabled: true }) });
     assert.equal(saved.status, 200);
-    const started = await request("/api/feishu/oauth/start", { method: "POST", headers: { "X-Forwarded-Host": "tona.example", "X-Forwarded-Proto": "https" }, body: JSON.stringify({ toolId: "feishu_calendar_plan" }) });
+    const botId = saved.body.bot.id;
+    const configBefore = await request("/api/feishu/oauth/config?botId=" + encodeURIComponent(botId), { headers: { "X-Forwarded-Host": "tona.example", "X-Forwarded-Proto": "https" } });
+    assert.equal(configBefore.body.redirectUri, "https://tona.example/feishu/oauth/callback/usr_owner");
+    assert.equal(configBefore.body.connected, false);
+    const wrongAgent = await request("/api/feishu/oauth/config?botId=bot_missing", { headers: { "X-Forwarded-Host": "tona.example", "X-Forwarded-Proto": "https" } });
+    assert.equal(wrongAgent.status, 404, "OAuth configuration must never fall back to another Agent bot");
+    const started = await request("/api/feishu/oauth/start", { method: "POST", headers: { "X-Forwarded-Host": "tona.example", "X-Forwarded-Proto": "https" }, body: JSON.stringify({ botId }) });
     assert.equal(started.status, 200);
     assert.equal(started.body.redirectUri, "https://tona.example/feishu/oauth/callback/usr_owner");
     assert(started.body.scopes.includes("calendar:calendar"));
@@ -70,13 +76,16 @@ async function ready() {
     const runtime = await request("/api/runtime");
     const calendar = runtime.body.tools.find((tool) => tool.id === "feishu_calendar_plan");
     assert.equal(calendar.status, "authorized");
-    assert.equal(calendar.action.type, "feishu_oauth");
+    assert.equal(calendar.action, undefined, "OAuth action belongs in the Feishu Agent configuration, not Tools");
+    const configAfter = await request("/api/feishu/oauth/config?botId=" + encodeURIComponent(botId), { headers: { "X-Forwarded-Host": "tona.example", "X-Forwarded-Proto": "https" } });
+    assert.equal(configAfter.body.connected, true);
+    assert.equal(configAfter.body.authorizations[0].userOpenId, "ou_callback_user");
 
     const stored = fs.readFileSync(path.join(dataDir, "studio.json"), "utf8");
     assert(!stored.includes("uat_callback_secret"));
     assert(!stored.includes("urt_callback_secret"));
     assert.match(stored, /enc:v1:/);
-    console.log("Feishu OAuth API test passed: consent URL, signed callback, token exchange, encrypted storage, safe status, and authorized Runtime state.");
+    console.log("Feishu OAuth API test passed: consent URL, signed callback, token exchange, encrypted storage, safe status, Agent-bound configuration, and authorized Runtime state.");
   } finally {
     child?.kill();
     await new Promise((resolve) => fakeApi?.close(resolve));
