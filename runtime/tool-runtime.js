@@ -4,6 +4,7 @@ const { deterministicTools } = require("./deterministic-tools");
 const { UNIVERSAL_CAPABILITIES } = require("./capability-planner");
 const { fileTools } = require("./workspace-files");
 const { memoryTools } = require("./memory-tools");
+const { pdfTools } = require("./pdf-tools");
 const { buildIsolatedExecutorTools, executorConfig } = require("./isolated-executor-tools");
 const { createPluginHost } = require("./plugin-runtime");
 const { createToolRegistry, publicToolDefinition, executeRegisteredTool } = require("./runtime-v2");
@@ -348,6 +349,7 @@ const PLUGIN_HOST = createPluginHost([
   { id: "tona.web", name: "TONA Web", version: "1.0.0", scope: "universal", description: "Public web search and safe page reading.", tools: webTools },
   { id: "tona.deterministic", name: "TONA Deterministic", version: "1.0.0", scope: "universal", description: "Date, math, unit, statistics, and structured table tools.", tools: deterministicTools },
   { id: "tona.workspace-files", name: "TONA Workspace Files", version: "1.0.0", scope: "universal", description: "Workspace-isolated file and artifact operations.", tools: fileTools },
+  { id: "tona.pdf", name: "TONA PDF", version: "1.0.0", scope: "universal", description: "Local PDF text extraction with source traceability and OCR handoff.", tools: pdfTools },
   { id: "tona.memory", name: "TONA Hybrid Memory", version: "1.0.0", scope: "universal", description: "Durable workspace memory with hybrid retrieval and explicit write/delete approval.", tools: memoryTools },
   { id: "tona.isolated-executor", name: "TONA Isolated Executor", version: "1.0.0", scope: "universal", status: executorConfig().ready ? "ready" : "configuration_required", description: "Sandbox adapters for Python, R, SQL, document parsing, browser automation, and allowlisted MCP servers.", tools: isolatedExecutorTools }
 ]);
@@ -365,7 +367,7 @@ const plannedSchemas = {
     outputSchema: { type: "object", required: ["artifacts"], properties: { artifacts: { type: "array" } } }
   }
 };
-const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned").map((tool) => ({ ...tool, ...plannedSchemas[tool.id] }));
+const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned" && tool.id !== "pdf_parse").map((tool) => ({ ...tool, ...plannedSchemas[tool.id] }));
 const registeredToolIds = new Set(TOOL_REGISTRY.keys());
 const orchestrationInputSchema = { type: "object", required: ["request"], properties: { request: { type: "string", minLength: 1, maxLength: 5000 } }, additionalProperties: false };
 const orchestrationOutputSchema = { type: "object", required: ["status"], properties: { status: { type: "string", enum: ["planned", "pending_confirmation", "authorization_required", "permission_required", "completed", "failed"] }, receipt: { type: "string" } }, additionalProperties: false };

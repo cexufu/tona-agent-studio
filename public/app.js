@@ -149,12 +149,29 @@ function renderRuntime() {
     "<p><strong>配置供应商：</strong>" + escapeHtml(settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>实际供应商：</strong>" + escapeHtml(settings.search?.activeProvider || settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>安全策略：</strong>只允许公开 HTTP/HTTPS；阻止 localhost、内网地址和超大页面。</p>";
-  const toolStatusLabels = { ready: "可用", authorization_required: "需要个人授权", permission_required: "需要飞书权限", planned: "规划中" };
-  document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) =>
-    '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><span class="pill ' + (tool.status === "ready" ? "enabled" : "") + '">' + escapeHtml(toolStatusLabels[tool.status] || tool.status || "未知") + '</span></div>'
-  ).join("");
+  const toolStatusLabels = { ready: "\u53ef\u7528", authorized: "\u5df2\u6388\u6743", authorization_required: "\u9700\u8981\u4e2a\u4eba\u6388\u6743", permission_required: "\u9700\u8981\u98de\u4e66\u6743\u9650", configuration_required: "\u9700\u914d\u7f6e", planned: "\u89c4\u5212\u4e2d" };
+  document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) => {
+    const action = tool.action || {};
+    const actionHtml = action.type === "feishu_oauth"
+      ? '<button type="button" data-runtime-oauth="' + escapeHtml(tool.id) + '">' + escapeHtml(action.label || "\u5f00\u59cb\u6388\u6743") + '</button>'
+      : action.type === "feishu_admin"
+        ? '<a class="button-link" target="_blank" rel="noopener" href="' + escapeHtml(action.url) + '">' + escapeHtml(action.label || "\u98de\u4e66\u5f00\u653e\u5e73\u53f0") + '</a>' : "";
+    return '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><div class="button-row"><span class="pill ' + (["ready", "authorized"].includes(tool.status) ? "enabled" : "") + '">' + escapeHtml(toolStatusLabels[tool.status] || tool.status || "\u672a\u77e5") + '</span>' + actionHtml + '</div></div>';
+  }).join("");
 }
 
+async function handleRuntimeToolAction(event) {
+  const button = event.target.closest("[data-runtime-oauth]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const result = await api("/api/feishu/oauth/start", { method: "POST", body: JSON.stringify({ toolId: button.dataset.runtimeOauth }) });
+    window.location.assign(result.authorizationUrl);
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+}
 async function saveRuntime() {
   const result = await api("/api/runtime", { method: "POST", body: JSON.stringify(runtimeFormPayload()) });
   state.runtime = { ...state.runtime, ...result, tools: state.runtime.tools };
@@ -838,6 +855,7 @@ function bindEvents() {
   $("#sendToLarkButton").addEventListener("click", sendToLark);
   bindIfPresent("#saveRuntimeButton", "click", saveRuntime);
   bindIfPresent("#testRuntimeButton", "click", testRuntime);
+  bindIfPresent("#runtimeToolCatalog", "click", handleRuntimeToolAction);
   bindIfPresent("#providerForm", "submit", saveProvider);
   bindIfPresent("#agentForm", "submit", saveAgent);
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);

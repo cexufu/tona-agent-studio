@@ -14,6 +14,7 @@ const {
 const { WorkspaceFileStore, MAX_FILE_BYTES } = require("./runtime/workspace-files");
 const { HybridMemoryStore } = require("./runtime/memory-tools");
 const { prepareAgentToolResult } = require("./runtime/agent-tools");
+const { signOauthState, verifyOauthState, createAuthorizationUrl, exchangeAuthorizationCode, getFeishuUserInfo, publicAuthorization } = require("./runtime/feishu-oauth");
 const {
   needsCapabilityPlanning,
   fallbackCapabilityPlan,
@@ -371,7 +372,7 @@ function ensureStore() {
 }
 
 // TONA_SECRETS_ENCRYPTION_V1: encrypt credentials at rest when the Render master key is configured.
-const SECRET_FIELDS = new Set(['apiKey', 'larkWebhookSecret', 'larkAppSecret', 'larkVerificationToken', 'larkEncryptKey', 'appSecret', 'verificationToken', 'encryptKey']);
+const SECRET_FIELDS = new Set(['apiKey', 'larkWebhookSecret', 'larkAppSecret', 'larkVerificationToken', 'larkEncryptKey', 'appSecret', 'verificationToken', 'encryptKey', 'accessToken', 'refreshToken']);
 function secretsKey() {
   const source = String(process.env.TONA_SECRETS_KEY || '');
   return source.length >= 24 ? crypto.createHash('sha256').update(source).digest() : null;
@@ -444,7 +445,7 @@ function writeDb(db) {
 
 function publicDb(db) {
   const settings = db.settings || {};
-  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, assistantTasks, runtime, ...safeSettings } = settings;
+  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, assistantTasks, feishuUserAuthorizations, runtime, ...safeSettings } = settings;
   return {
     ...db,
     providers: db.providers.map((provider) => ({
@@ -454,6 +455,7 @@ function publicDb(db) {
     settings: {
       ...safeSettings,
       runtime: publicRuntimeSettings(runtime, maskSecret),
+      feishuOAuth: { connected: (feishuUserAuthorizations || []).some((item) => item.status === "active"), authorizations: (feishuUserAuthorizations || []).map(publicAuthorization) },
       collaborationPolicy: normalizeCollaborationPolicy(settings.collaborationPolicy, db.agents),
       larkWebhookSecret: settings.larkWebhookSecret ? maskSecret(settings.larkWebhookSecret) : "",
       larkAppSecret: settings.larkAppSecret ? maskSecret(settings.larkAppSecret) : "",
@@ -1243,6 +1245,96 @@ function publicFeishuCallbackUrl(req) {
   return proto + "://" + host + "/feishu/events/" + encodeURIComponent(workspaceId);
 }
 
+function publicRequestOrigin(req) {
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "";
+  const proto = String(req.headers["x-forwarded-proto"] || (process.env.NODE_ENV === "production" ? "https" : "http")).split(",")[0].trim();
+  return host ? proto + "://" + String(host).split(",")[0].trim() : "";
+}
+
+function oauthBot(db, botId = "") {
+  const bots = (db.settings?.larkBots || []).filter((item) => item.enabled !== false && item.appId && item.appSecret);
+  const selected = (botId && bots.find((item) => item.id === botId)) || bots[0];
+  if (selected) return selected;
+  if (db.settings?.larkAppId && db.settings?.larkAppSecret) return { id: "legacy", appId: db.settings.larkAppId, appSecret: db.settings.larkAppSecret, enabled: true };
+  throw Object.assign(new Error("Configure an enabled Feishu app (App ID and App Secret) before starting personal authorization."), { code: "FEISHU_APP_REQUIRED", statusCode: 409 });
+}
+
+function oauthStateSecret(bot) {
+  const source = process.env.TONA_OAUTH_STATE_KEY || process.env.TONA_SECRETS_KEY || bot?.appSecret;
+  if (!source) throw Object.assign(new Error("Configure TONA_OAUTH_STATE_KEY or a Feishu App Secret before starting OAuth."), { code: "FEISHU_OAUTH_STATE_KEY_REQUIRED", statusCode: 503 });
+  return crypto.createHash("sha256").update("tona-feishu-oauth:" + source).digest("hex");
+}
+
+function oauthScopes(db, requested = []) {
+  const allowed = new Set(FEISHU_CAPABILITY_REQUESTS.flatMap((item) => item.kind === "user_oauth" ? item.scopes : []).filter((scope) => /^[a-z][a-z0-9_-]*:[a-z0-9_.:-]+$/i.test(scope)));
+  const values = (requested.length ? requested : ["calendar:calendar:readonly", "calendar:calendar"]).filter((scope) => allowed.has(scope));
+  return [...new Set([...values, "offline_access"])];
+}
+
+function activeFeishuAuthorizations(db) {
+  return (db.settings?.feishuUserAuthorizations || []).filter((item) => item.status === "active" && item.accessToken && ((!item.expiresAt || Date.parse(item.expiresAt) > Date.now()) || (item.refreshToken && (!item.refreshExpiresAt || Date.parse(item.refreshExpiresAt) > Date.now()))));
+}
+
+function runtimeToolCatalog(db) {
+  const authorizations = activeFeishuAuthorizations(db);
+  const calendarAuthorized = authorizations.some((item) => (item.scopes || []).some((scope) => scope === "calendar:calendar" || scope === "calendar:calendar:readonly"));
+  return TOOL_CATALOG.map((tool) => {
+    if (tool.id === "feishu_calendar_plan") return {
+      ...tool,
+      status: calendarAuthorized ? "authorized" : "authorization_required",
+      description: calendarAuthorized ? "Personal Feishu calendar authorization is connected; each actual calendar write still requires confirmation." : tool.description,
+      action: { type: "feishu_oauth", label: calendarAuthorized ? "Reauthorize" : "Start authorization", endpoint: "/api/feishu/oauth/start" }
+    };
+    if (tool.status === "permission_required") return { ...tool, action: { type: "feishu_admin", label: "Open Feishu console", url: "https://open.feishu.cn/app" } };
+    return tool;
+  });
+}
+
+async function handleFeishuOauthCallback(req, res, workspaceId) {
+  try {
+    const requestUrl = new URL(req.url, "http://localhost");
+    if (requestUrl.searchParams.get("error")) throw Object.assign(new Error(requestUrl.searchParams.get("error_description") || requestUrl.searchParams.get("error")), { statusCode: 400 });
+    const code = requestUrl.searchParams.get("code");
+    const stateValue = requestUrl.searchParams.get("state");
+    if (!code || !stateValue) throw Object.assign(new Error("Feishu OAuth callback is missing code or state."), { statusCode: 400 });
+    return workspaceContext.run(workspaceId === LEGACY_OWNER_ID ? {} : { workspaceId }, async () => {
+      const db = readDb();
+      const unsignedBody = String(stateValue).split(".")[0] || "";
+      let unverified = {};
+      try { unverified = JSON.parse(Buffer.from(unsignedBody.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")); } catch {}
+      const bot = oauthBot(db, unverified.botId || "");
+      const state = verifyOauthState(stateValue, oauthStateSecret(bot));
+      if (state.workspaceId !== workspaceId) throw Object.assign(new Error("Feishu OAuth workspace mismatch."), { code: "FEISHU_OAUTH_WORKSPACE_MISMATCH", statusCode: 403 });
+      const token = await exchangeAuthorizationCode({ appId: bot.appId, appSecret: bot.appSecret, code, redirectUri: state.redirectUri }, { apiBase: FEISHU_OPEN_API_BASE });
+      if (!token.access_token) throw Object.assign(new Error("Feishu did not return a user access token."), { code: "FEISHU_ACCESS_TOKEN_MISSING", statusCode: 502 });
+      const user = await getFeishuUserInfo(token.access_token, { apiBase: FEISHU_OPEN_API_BASE });
+      const now = new Date();
+      const scopes = Array.isArray(token.scope) ? token.scope : String(token.scope || state.scopes.join(" ")).split(/[ ,]+/).filter(Boolean);
+      const record = {
+        id: "foauth_" + crypto.randomUUID().slice(0, 12), botId: bot.id, appId: bot.appId,
+        userOpenId: user.open_id || state.userOpenId || "", unionId: user.union_id || "", name: user.name || user.en_name || "Feishu user",
+        scopes, accessToken: token.access_token, refreshToken: token.refresh_token || "",
+        expiresAt: new Date(now.getTime() + Math.max(60, Number(token.expires_in) || 7200) * 1000).toISOString(),
+        refreshExpiresAt: token.refresh_expires_in ? new Date(now.getTime() + Number(token.refresh_expires_in) * 1000).toISOString() : "",
+        status: "active", createdAt: now.toISOString(), updatedAt: now.toISOString()
+      };
+      db.settings ||= {};
+      const authorizations = Array.isArray(db.settings.feishuUserAuthorizations) ? db.settings.feishuUserAuthorizations : [];
+      const existing = authorizations.find((item) => item.botId === record.botId && item.userOpenId === record.userOpenId);
+      if (existing) Object.assign(existing, record, { id: existing.id, createdAt: existing.createdAt || record.createdAt }); else authorizations.push(record);
+      db.settings.feishuUserAuthorizations = authorizations.slice(-100);
+      const request = (db.settings.skillRequests || []).find((item) => item.id === state.requestId);
+      if (request) { request.status = "authorized"; request.authorizedBy = record.userOpenId; request.updatedAt = now.toISOString(); }
+      const task = (db.settings.assistantTasks || []).find((item) => item.id === state.requestId && item.type === "calendar");
+      if (task) { task.status = "oauth_authorized"; task.authorizedBy = record.userOpenId; task.updatedAt = now.toISOString(); }
+      writeDb(db);
+      return sendText(res, 200, '<!doctype html><meta charset="utf-8"><title>Feishu authorization complete</title><style>body{font:16px system-ui;max-width:640px;margin:10vh auto;padding:24px;color:#172033}a{color:#1769e0}</style><h1>Feishu authorization complete</h1><p>The personal account has been securely connected to this TONA workspace.</p><p>You can close this page or <a href="/">return to TONA Agent Studio</a>.</p>', "text/html; charset=utf-8");
+    });
+  } catch (error) {
+    logServerError(error);
+    return sendText(res, error.statusCode || 400, '<!doctype html><meta charset="utf-8"><title>Feishu authorization failed</title><h1>Authorization failed</h1><p>' + String(error.message || error).replace(/[&<>"']/g, "") + '</p><p><a href="/">Return to TONA Agent Studio</a></p>', "text/html; charset=utf-8");
+  }
+}
 function larkEventLogDir() {
   return path.join(path.dirname(storagePaths().dbPath), "lark_events");
 }
@@ -2398,13 +2490,34 @@ async function handleApiInWorkspace(req, res, pathname) {
     if (req.method === "GET" && pathname === "/api/model-usage") {
       return sendJson(res, 200, modelUsageSummary());
     }
+    if (req.method === "GET" && pathname === "/api/feishu/oauth/status") {
+      const db = readDb();
+      return sendJson(res, 200, { connected: activeFeishuAuthorizations(db).length > 0, authorizations: activeFeishuAuthorizations(db).map(publicAuthorization) });
+    }
+    if (req.method === "POST" && pathname === "/api/feishu/oauth/start") {
+      const body = await readBody(req);
+      const db = readDb();
+      const bot = oauthBot(db, String(body.botId || ""));
+      if (!secretsKey()) throw Object.assign(new Error("Configure TONA_SECRETS_KEY (at least 24 characters) before storing Feishu user tokens."), { statusCode: 503, code: "TONA_SECRETS_KEY_REQUIRED" });
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const origin = publicRequestOrigin(req);
+      if (!origin) throw Object.assign(new Error("Cannot determine the public TONA origin for OAuth callback."), { statusCode: 400, code: "FEISHU_OAUTH_ORIGIN_MISSING" });
+      const requestId = String(body.requestId || "").slice(0, 100);
+      const request = [...(db.settings?.skillRequests || []), ...(db.settings?.assistantTasks || [])].find((item) => item.id === requestId);
+      const requestedScopes = request?.scopes || (Array.isArray(body.scopes) ? body.scopes : []);
+      const scopes = oauthScopes(db, requestedScopes);
+      const redirectUri = origin + "/feishu/oauth/callback/" + encodeURIComponent(workspaceId);
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+      const state = signOauthState({ workspaceId, botId: bot.id, requestId, userOpenId: String(body.userOpenId || "").slice(0, 100), scopes, redirectUri, exp: expiresAt, nonce: crypto.randomUUID() }, oauthStateSecret(bot));
+      return sendJson(res, 200, { authorizationUrl: createAuthorizationUrl({ appId: bot.appId, redirectUri, scopes, state }), redirectUri, expiresAt: new Date(expiresAt).toISOString(), scopes, botId: bot.id });
+    }
     if (req.method === "GET" && pathname === "/api/runtime") {
       const db = readDb();
       const settings = publicRuntimeSettings(db.settings?.runtime, maskSecret);
       return sendJson(res, 200, {
         settings,
         plugins: PLUGIN_CATALOG,
-        tools: TOOL_CATALOG,
+        tools: runtimeToolCatalog(db),
         usage: runtimeUsageSummary(db.settings?.runtime, storagePaths().toolUsagePath)
       });
     }
@@ -2457,7 +2570,7 @@ async function handleApiInWorkspace(req, res, pathname) {
         settings: db.settings?.runtime, workspaceId, authorizedWorkspaceId: workspaceId,
         idempotencyKey: String(req.headers["idempotency-key"] || body.idempotencyKey || "").slice(0, 120),
         allowedRisks: body.confirmed === true ? ["read", "write", "execute"] : ["read"],
-        fileStore: ["file_read", "artifact_generate"].includes(runtimeToolMatch[1]) ? workspaceFileStore() : undefined,
+        fileStore: ["file_read", "pdf_parse", "artifact_generate"].includes(runtimeToolMatch[1]) ? workspaceFileStore() : undefined,
         memoryStore: runtimeToolMatch[1].startsWith("memory_") ? workspaceMemoryStore() : undefined,
         audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
       });
@@ -2486,6 +2599,15 @@ async function handleApiInWorkspace(req, res, pathname) {
     if (req.method === "GET" && fileReadMatch) {
       const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
       const execution = await executeTool("file_read", { file_id: fileReadMatch[1] }, {
+        workspaceId, authorizedWorkspaceId: workspaceId, fileStore: workspaceFileStore(),
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
+      });
+      return sendJson(res, 200, execution);
+    }
+    const fileParseMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/parse$/);
+    if (req.method === "POST" && fileParseMatch) {
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const execution = await executeTool("pdf_parse", { file_id: fileParseMatch[1] }, {
         workspaceId, authorizedWorkspaceId: workspaceId, fileStore: workspaceFileStore(),
         audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
       });
@@ -2716,6 +2838,8 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && (url.pathname === "/gateway/health" || url.pathname === "/api/health")) {
     return sendJson(res, 200, { ok: true, service: "tona-agent-studio" });
   }
+  const oauthCallback = url.pathname.match(/^\/feishu\/oauth\/callback\/([A-Za-z0-9_-]{3,80})$/);
+  if (req.method === "GET" && oauthCallback) return handleFeishuOauthCallback(req, res, oauthCallback[1]);
   const scopedEvent = url.pathname.match(/^\/feishu\/events\/([A-Za-z0-9_-]{3,80})$/);
   if (scopedEvent) {
     return workspaceContext.run({ workspaceId: scopedEvent[1] }, () => handleFeishuEvent(req, res));
