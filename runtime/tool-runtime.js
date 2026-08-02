@@ -3,6 +3,9 @@ const net = require("net");
 const { deterministicTools } = require("./deterministic-tools");
 const { UNIVERSAL_CAPABILITIES } = require("./capability-planner");
 const { fileTools } = require("./workspace-files");
+const { memoryTools } = require("./memory-tools");
+const { buildIsolatedExecutorTools, executorConfig } = require("./isolated-executor-tools");
+const { createPluginHost } = require("./plugin-runtime");
 const { createToolRegistry, publicToolDefinition, executeRegisteredTool } = require("./runtime-v2");
 
 const TOOL_CATALOG = [
@@ -340,7 +343,16 @@ const webTools = [
     handler: (input, context) => executeToolData("web_read", input, context)
   }
 ];
-const TOOL_REGISTRY = createToolRegistry([...webTools, ...deterministicTools, ...fileTools]);
+const isolatedExecutorTools = buildIsolatedExecutorTools();
+const PLUGIN_HOST = createPluginHost([
+  { id: "tona.web", name: "TONA Web", version: "1.0.0", scope: "universal", description: "Public web search and safe page reading.", tools: webTools },
+  { id: "tona.deterministic", name: "TONA Deterministic", version: "1.0.0", scope: "universal", description: "Date, math, unit, statistics, and structured table tools.", tools: deterministicTools },
+  { id: "tona.workspace-files", name: "TONA Workspace Files", version: "1.0.0", scope: "universal", description: "Workspace-isolated file and artifact operations.", tools: fileTools },
+  { id: "tona.memory", name: "TONA Hybrid Memory", version: "1.0.0", scope: "universal", description: "Durable workspace memory with hybrid retrieval and explicit write/delete approval.", tools: memoryTools },
+  { id: "tona.isolated-executor", name: "TONA Isolated Executor", version: "1.0.0", scope: "universal", status: executorConfig().ready ? "ready" : "configuration_required", description: "Sandbox adapters for Python, R, SQL, document parsing, browser automation, and allowlisted MCP servers.", tools: isolatedExecutorTools }
+]);
+const PLUGIN_CATALOG = PLUGIN_HOST.publicCatalog();
+const TOOL_REGISTRY = createToolRegistry(PLUGIN_HOST.tools);
 const plannedSchemas = {
   pdf_parse: {
     policy: { timeoutMs: 30000, retries: 0, idempotent: true, rateLimit: { maxCalls: 30, windowMs: 60000 } },
@@ -396,6 +408,7 @@ function sourceAppendix(result) {
 
 module.exports = {
   TOOL_CATALOG,
+  PLUGIN_CATALOG,
   normalizeRuntimeSettings,
   publicRuntimeSettings,
   runtimeCredential,
