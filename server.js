@@ -1580,12 +1580,55 @@ function feishuChatText(text) {
     if (compact.at(-1) === line) continue;
     compact.push(line);
   }
-  const joined = compact.join("\n");
-  return joined.length > 4800 ? joined.slice(0, 4770) + "\n…（内容较长，可 @我要求展开）" : joined;
+  return compact.join("\n");
 }
+
+const FEISHU_POST_MAX_LINES = 20;
+const FEISHU_POST_MAX_CHARACTERS = 3500;
+const FEISHU_REPLY_PART_DELAY_MS = 250;
+
+function splitFeishuPostText(text) {
+  const sourceLines = feishuChatText(text).split("\n").filter(Boolean);
+  const lines = [];
+  for (const sourceLine of sourceLines) {
+    const characters = Array.from(sourceLine);
+    if (!characters.length) continue;
+    for (let offset = 0; offset < characters.length; offset += FEISHU_POST_MAX_CHARACTERS) {
+      lines.push(characters.slice(offset, offset + FEISHU_POST_MAX_CHARACTERS).join(""));
+    }
+  }
+
+  const chunks = [];
+  let current = [];
+  let currentCharacters = 0;
+  for (const line of lines) {
+    const lineCharacters = Array.from(line).length;
+    if (current.length && (current.length >= FEISHU_POST_MAX_LINES || currentCharacters + lineCharacters > FEISHU_POST_MAX_CHARACTERS)) {
+      chunks.push(current);
+      current = [];
+      currentCharacters = 0;
+    }
+    current.push(line);
+    currentCharacters += lineCharacters;
+  }
+  if (current.length) chunks.push(current);
+  return chunks.length ? chunks : [["已收到。"]];
+}
+
+function feishuPostContents(text, title = "") {
+  const chunks = splitFeishuPostText(text);
+  return chunks.map((lines, index) => {
+    const partTitle = chunks.length > 1
+      ? [String(title || "回复").slice(0, 64), `（${index + 1}/${chunks.length}）`].join("")
+      : String(title || "").slice(0, 80);
+    return { zh_cn: { title: partTitle, content: lines.map((line) => [{ tag: "text", text: line }]) } };
+  });
+}
+
 function feishuPostContent(text, title = "") {
-  const rows = feishuChatText(text).split("\n").filter(Boolean).slice(0, 24).map((line) => [{ tag: "text", text: line }]);
-  return { zh_cn: { title: String(title || "").slice(0, 80), content: rows.length ? rows : [[{ tag: "text", text: "已收到。" }]] } };
+  const content = feishuPostContents(text, title)[0];
+  content.zh_cn.title = String(title || "").slice(0, 80);
+  return content;
 }
 function groupMessageRequestsCollaboration(db, message, bot) {
   if (startsCollaborationTask(message.text)) return true;
@@ -1598,7 +1641,13 @@ function groupMessageRequestsCollaboration(db, message, bot) {
 
 
 async function replyFeishuMessage(settings, messageId, text) {
-  return replyFeishuMessagePayload(settings, messageId, "post", feishuPostContent(text));
+  const contents = feishuPostContents(text);
+  const responses = [];
+  for (let index = 0; index < contents.length; index += 1) {
+    if (index > 0) await new Promise((resolve) => setTimeout(resolve, FEISHU_REPLY_PART_DELAY_MS));
+    responses.push(await replyFeishuMessagePayload(settings, messageId, "post", contents[index]));
+  }
+  return responses.at(-1);
 }
 async function replyFeishuInteractiveCard(settings, messageId, card) {
   return replyFeishuMessagePayload(settings, messageId, "interactive", card);
