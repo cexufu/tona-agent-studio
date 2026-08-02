@@ -6,16 +6,45 @@ const DEFAULT_BUDGET = Object.freeze({ maxSteps: 8, maxToolCalls: 6, maxModelCal
 
 function nowIso(now = Date.now()) { return new Date(now).toISOString(); }
 function compactText(value, limit = 6000) {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  let text;
+  if (typeof value === "string") text = value;
+  else {
+    try { text = JSON.stringify(value); } catch { text = String(value ?? ""); }
+    if (typeof text !== "string") text = String(value ?? "");
+  }
   if (text.length <= limit) return text;
   const edge = Math.max(200, Math.floor((limit - 80) / 2));
   return text.slice(0, edge) + `\n...[${text.length - edge * 2} characters offloaded]...\n` + text.slice(-edge);
 }
+function firstJsonObject(content) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (start < 0) {
+      if (character === "{") { start = index; depth = 1; }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return content.slice(start, index + 1);
+    }
+  }
+  throw new Error("PAOVRD model response did not contain a complete JSON object.");
+}
 function parseJsonObject(value) {
   const content = String(value?.content ?? value ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const start = content.indexOf("{"); const end = content.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("PAOVRD model response did not contain a JSON object.");
-  return JSON.parse(content.slice(start, end + 1));
+  return JSON.parse(firstJsonObject(content));
 }
 function taskEvent(task, phase, detail = {}) {
   task.trace.push({ at: nowIso(), phase, ...detail });

@@ -71,6 +71,21 @@ function event(messageId, text, parentId = "") {
     }
   };
 }
+function botPostEvent(messageId) {
+  return {
+    header: { event_type: "im.message.receive_v1", app_id: "cli_memory" },
+    event: {
+      sender: { sender_type: "bot", sender_id: { open_id: "ou_memory_bot" } },
+      message: {
+        message_id: messageId,
+        chat_id: "chat_memory",
+        chat_type: "group",
+        message_type: "post",
+        content: JSON.stringify({ title: "", content: [[{ tag: "text", text: "Bot post echo" }]] })
+      }
+    }
+  };
+}
 
 (async () => {
   let child;
@@ -96,6 +111,23 @@ function event(messageId, text, parentId = "") {
     if (!secondPrompt.includes("Please add these rules to the action guide.")) throw new Error("Previous user turn was missing from model context.");
     if (!secondPrompt.includes("Rules are complete and ready for confirmation.")) throw new Error("Previous assistant turn was missing from model context.");
     if (!secondPrompt.includes("quoted by current message")) throw new Error("Feishu parent_id was not linked to the quoted assistant turn.");
+    await request("/feishu/events/usr_owner", { method: "POST", body: JSON.stringify(botPostEvent("bot_post_echo")) });
+    const eventLogDir = path.join(dataDir, "workspaces", "usr_owner", "lark_events");
+    let botPostLog = "";
+    for (let index = 0; index < 40; index += 1) {
+      if (fs.existsSync(eventLogDir)) {
+        botPostLog = fs.readdirSync(eventLogDir).filter((file) => file.endsWith(".json")).find((file) => {
+          const entry = JSON.parse(fs.readFileSync(path.join(eventLogDir, file), "utf8"));
+          return entry.body?.event?.message?.message_id === "bot_post_echo";
+        }) || "";
+      }
+      if (botPostLog) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (!botPostLog) throw new Error("Feishu post echo event was not logged.");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const botPostError = path.join(eventLogDir, botPostLog.replace(/\.json$/, ".reply-error.txt"));
+    if (fs.existsSync(botPostError)) throw new Error("Feishu post echo triggered a reply error: " + fs.readFileSync(botPostError, "utf8"));
     const stored = JSON.parse(fs.readFileSync(path.join(dataDir, "workspaces", "usr_owner", "studio.json"), "utf8"));
     const memory = stored.settings.groupKnowledge || [];
     if (!memory.some((item) => item.messageId === "bot_reply_1" && item.senderType === "assistant")) throw new Error("Assistant turn was not persisted in conversation memory.");

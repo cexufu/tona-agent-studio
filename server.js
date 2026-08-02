@@ -1535,6 +1535,21 @@ function makeConversationThreadId(message) {
   const seed = message.messageId || `${message.chatId || "chat"}:${message.rawText || message.text || Date.now()}`;
   return crypto.createHash("sha1").update(seed).digest("hex").slice(0, 12);
 }
+function feishuContentText(value) {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return value.map(feishuContentText).filter(Boolean).join("");
+  if (typeof value !== "object") return String(value);
+  for (const locale of ["zh_cn", "en_us", "ja_jp"]) {
+    if (value[locale]) return feishuContentText(value[locale]);
+  }
+  if (typeof value.text === "string") return value.text;
+  if (value.text && typeof value.text === "object") return feishuContentText(value.text);
+  if (typeof value.content === "string") return value.content;
+  if (Array.isArray(value.content)) return value.content.map(feishuContentText).filter(Boolean).join("\n");
+  if (value.text_run?.content !== undefined) return feishuContentText(value.text_run.content);
+  return "";
+}
 function extractFeishuMessage(eventBody) {
   const event = eventBody.event || eventBody;
   const message = event.message || {};
@@ -1548,7 +1563,7 @@ function extractFeishuMessage(eventBody) {
   if (message.content) {
     try {
       const content = typeof message.content === "string" ? JSON.parse(message.content) : message.content;
-      rawText = content.text || content.content || "";
+      rawText = feishuContentText(content);
       text = rawText;
     } catch {
       rawText = String(message.content || "");
@@ -2373,7 +2388,7 @@ function summarizeFeishuEventLog(entry, errorText = "") {
   if (message.content) {
     try {
       const content = typeof message.content === "string" ? JSON.parse(message.content) : message.content;
-      text = content.text || content.content || "";
+      text = feishuContentText(content);
     } catch {
       text = String(message.content || "");
     }

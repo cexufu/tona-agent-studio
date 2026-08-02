@@ -46,6 +46,21 @@ function scriptedModel(script) {
   assert.deepEqual(firstModel.calls, ["plan", "act", "act", "verify", "deliver"]);
   assert(persistence.some((item) => item.phase === "observe"));
 
+  const noisyJsonModel = scriptedModel({
+    plan: [JSON.stringify({ summary: "检索", steps: ["搜索"], completionCriteria: ["有来源"] }) + "\n" + JSON.stringify({ ignored: true })],
+    act: [JSON.stringify({ type: "tool", toolId: "web_search", input: { query: "Agent Harness" }, rationale: "需要公开来源" }) + " trailing explanation", JSON.stringify({ type: "finish", rationale: "已有来源" })],
+    verify: [JSON.stringify({ passed: true, summary: "已核验", gaps: [], next: "deliver", question: "" })],
+    deliver: ["已完成带冗余模型输出的任务。"]
+  });
+  const noisyJsonTask = createPaovrdTask({ goal: "检索 Agent Harness 公开资料" });
+  const noisyJsonResult = await runPaovrd(noisyJsonTask, {
+    tools: [readTool], callModel: noisyJsonModel.callModel,
+    executeTool: async () => ({ invocationId: "inv_noisy", data: { sources: [{ title: "Source", url: "https://example.com/harness" }] }, artifactIds: [] }),
+    persist: () => {}
+  });
+  assert.equal(noisyJsonResult.status, "completed");
+  assert.equal(noisyJsonTask.observations[0].status, "success");
+
   const writeModel = scriptedModel({
     plan: [JSON.stringify({ summary: "生成产物", steps: ["创建文件", "验证"], completionCriteria: ["返回 artifact id"] })],
     act: [JSON.stringify({ type: "tool", toolId: "artifact_generate", input: { name: "report" }, rationale: "用户要求可下载产物" }), JSON.stringify({ type: "finish", rationale: "产物已创建" })],
