@@ -8,7 +8,8 @@ const {
   TOOL_CATALOG,
   normalizeRuntimeSettings,
   publicRuntimeSettings,
-  executeTool
+  executeTool,
+  executableToolCatalog
 } = require("./runtime/tool-runtime");
 const { WorkspaceFileStore, MAX_FILE_BYTES } = require("./runtime/workspace-files");
 const { prepareAgentToolResult } = require("./runtime/agent-tools");
@@ -18,6 +19,15 @@ const {
   plannerPrompt,
   parseCapabilityPlan
 } = require("./runtime/capability-planner");
+const {
+  createPaovrdTask,
+  shouldUsePaovrd,
+  runPaovrd,
+  approvePendingAction,
+  rejectPendingAction,
+  resumeWithUserInput,
+  compactText
+} = require("./runtime/agent-runtime-v3");
 const {
   runtimeUsageSummary,
   writeToolEvent,
@@ -33,6 +43,7 @@ const ROOT_DB_PATH = path.join(DATA_DIR, "studio.json");
 const WORKSPACES_DIR = path.join(DATA_DIR, "workspaces");
 const workspaceContext = new AsyncLocalStorage();
 const collaborationPilotLocks = new Set();
+const paovrdLocks = new Set();
 const HUB_AUTH_REQUIRED = process.env.TONA_HUB_AUTH_REQUIRED === "true";
 const TEAMFLOW_INTERNAL_PORT = Number(process.env.TEAMFLOW_INTERNAL_PORT || 7359);
 const LEGACY_OWNER_ID = process.env.TONA_LEGACY_OWNER_ID || "usr_owner";
@@ -1761,6 +1772,167 @@ function collaborationPlanFromCapabilityAction(db, bot, action) {
   if (selected.length < 2) return null;
   return { coordinatorAgentId: bot.agentId, participantAgentIds: selected, writerAgentId: selected[selected.length - 1], rounds: Math.min(3, Math.max(1, Number(action.rounds) || 2)) };
 }
+function paovrdTaskEntries(db) {
+  return assistantTaskEntries(db).filter((item) => item.type === "paovrd");
+}
+function createFeishuPaovrdTask(db, message, bot) {
+  const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  const task = createPaovrdTask({
+    goal: message.text,
+    context: groupKnowledgeContext(db, message),
+    agentId: bot?.agentId || "daily_assistant",
+    workspaceId,
+    chatId: message.chatId || "",
+    chatType: message.chatType || "",
+    messageId: message.messageId || "",
+    requestedBy: message.senderId || "",
+    botId: bot?.id || "",
+    botAppId: bot?.appId || ""
+  });
+  const tasks = assistantTaskEntries(db);
+  tasks.push(task);
+  db.settings.assistantTasks = tasks.slice(-300);
+  writeDb(db);
+  return task;
+}
+function latestWaitingPaovrdTask(db, message, bot) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  return paovrdTaskEntries(db).slice().reverse().find((task) =>
+    task.status === "waiting_input"
+    && task.chatId === message.chatId
+    && (!task.requestedBy || task.requestedBy === message.senderId)
+    && (!task.botId || task.botId === bot?.id)
+    && Date.parse(task.updatedAt || task.createdAt || 0) >= cutoff
+  ) || null;
+}
+function paovrdConfirmationCard(task) {
+  const pending = task.pendingAction || {};
+  const input = compactText(JSON.stringify(pending.action?.input || {}, null, 2), 1800).replace(/`/g, "'");
+  return {
+    config: { wide_screen_mode: true },
+    header: { title: { tag: "plain_text", content: "TONA 工具操作待确认" }, template: pending.risk === "execute" ? "orange" : "blue" },
+    elements: [
+      { tag: "div", text: { tag: "lark_md", content: `**任务：** ${compactText(task.goal, 300)}\n\n**准备调用：** ${pending.toolName || pending.action?.toolId || "工具"}\n\n**风险级别：** ${pending.risk || "write"}\n\n**原因：** ${pending.action?.rationale || "完成任务所需的下一步操作"}` } },
+      { tag: "div", text: { tag: "lark_md", content: `**调用参数**\n\`${input}\`` } },
+      { tag: "note", elements: [{ tag: "plain_text", content: "确认仅授权本次、当前参数的工具调用。参数变化后必须重新确认。" }] },
+      { tag: "action", actions: [
+        { tag: "button", text: { tag: "plain_text", content: "确认执行" }, type: "primary", value: { source: "tona_paovrd", taskId: task.id, workspaceId: task.workspaceId, botAppId: task.botAppId, action: "approve" } },
+        { tag: "button", text: { tag: "plain_text", content: "取消任务" }, type: "default", value: { source: "tona_paovrd", taskId: task.id, workspaceId: task.workspaceId, botAppId: task.botAppId, action: "reject" } }
+      ] }
+    ]
+  };
+}
+function paovrdDependencies(db, bot) {
+  const agent = db.agents.find((item) => item.id === bot?.agentId) || db.agents.find((item) => item.id === "daily_assistant") || db.agents[0];
+  const provider = db.providers.find((item) => item.id === agent?.providerId) || firstReadyProvider(db);
+  if (!agent) throw new Error("PAOVRD 任务没有可用角色。");
+  if (!provider || !provider.enabled || !provider.apiKey) throw new Error("PAOVRD 任务没有可用模型，请先在模型页启用并绑定模型。");
+  const plannerAgent = { ...agent, name: `${agent.name} PAOVRD`, temperature: 0.1 };
+  const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  return {
+    tools: executableToolCatalog(),
+    callModel: ({ phase, prompt }) => callOpenAICompatible(provider, phase === "deliver" ? agent : plannerAgent, [
+      { role: "system", content: phase === "deliver" ? agentSystemPrompt(agent) : "You are an internal PAOVRD controller. Follow the requested JSON contract exactly. Never expose hidden chain-of-thought." },
+      { role: "user", content: prompt }
+    ]),
+    executeTool: (toolId, input, execution) => executeTool(toolId, input, {
+      settings: db.settings?.runtime,
+      workspaceId,
+      authorizedWorkspaceId: workspaceId,
+      idempotencyKey: `paovrd:${execution.task.id}:${execution.task.metrics.steps + 1}:${toolId}`,
+      allowedRisks: execution.risk === "read" ? ["read"] : ["read", execution.risk],
+      fileStore: workspaceFileStore(),
+      audit: (event) => writeToolEvent(storagePaths().toolUsagePath, { ...event, feature: "paovrd", taskId: execution.task.id, agentId: agent.id })
+    }),
+    persist: () => writeDb(db)
+  };
+}
+async function executePaovrdAssistantTask(db, task, bot) {
+  const lockKey = `${task.workspaceId || activeWorkspaceId() || LEGACY_OWNER_ID}:${task.id}`;
+  if (paovrdLocks.has(lockKey)) return { status: "running", task, message: "任务正在执行。" };
+  paovrdLocks.add(lockKey);
+  try {
+    return await runPaovrd(task, paovrdDependencies(db, bot));
+  } catch (error) {
+    task.status = "failed";
+    task.error = String(error?.message || error).slice(0, 1000);
+    task.phase = task.phase || "plan";
+    task.updatedAt = new Date().toISOString();
+    task.trace = [...(task.trace || []), { at: task.updatedAt, phase: task.phase, status: "failed", error: task.error }].slice(-80);
+    writeDb(db);
+    return { status: "failed", task, message: "任务执行失败：" + task.error };
+  } finally {
+    paovrdLocks.delete(lockKey);
+  }
+}
+function paovrdResultPost(task, outcome) {
+  const titles = {
+    completed: "TONA 任务完成",
+    completed_with_limits: "TONA 任务达到运行上限",
+    waiting_input: "TONA 需要补充信息",
+    failed: "TONA 任务执行失败",
+    cancelled: "TONA 任务已取消"
+  };
+  return feishuPostContent(outcome.message || task.finalAnswer || task.error || "任务状态已更新。", titles[outcome.status] || "TONA 任务进展");
+}
+async function deliverPaovrdOutcome(db, bot, task, outcome, replyMessageId = "") {
+  const settings = larkBotToAppSettings(bot);
+  let delivery;
+  if (outcome.status === "waiting_confirmation") {
+    const card = paovrdConfirmationCard(task);
+    delivery = replyMessageId
+      ? await replyFeishuInteractiveCard(settings, replyMessageId, card)
+      : await sendFeishuMessageToChat(settings, task.chatId, "interactive", card);
+  } else {
+    const post = paovrdResultPost(task, outcome);
+    if (!replyMessageId && task.requestedBy) {
+      post.zh_cn.content.unshift([{ tag: "at", user_id: task.requestedBy, user_name: "任务发起人" }, { tag: "text", text: " PAOVRD 任务有新进展。" }]);
+    }
+    delivery = replyMessageId
+      ? await replyFeishuMessagePayload(settings, replyMessageId, "post", post)
+      : await sendFeishuMessageToChat(settings, task.chatId, "post", post);
+    if (["completed", "completed_with_limits", "failed"].includes(outcome.status)) {
+      const deliveredMessageId = delivery?.data?.message_id || delivery?.data?.message?.message_id || delivery?.message_id || `${task.id}:delivery`;
+      rememberGroupKnowledge(db, {
+        chatId: task.chatId,
+        chatType: task.chatType || "group",
+        messageId: String(deliveredMessageId),
+        parentId: task.messageId,
+        rootId: task.messageId,
+        senderId: bot.openId || bot.id || "",
+        senderType: "assistant",
+        agentId: task.agentId,
+        agentName: collaborationAgentName(db, task.agentId),
+        text: outcome.message || task.finalAnswer || ""
+      });
+    }
+  }
+  return delivery;
+}
+function schedulePaovrdResume(workspaceId, taskId) {
+  setImmediate(() => workspaceContext.run({ workspaceId }, async () => {
+    const db = readDb();
+    const task = paovrdTaskEntries(db).find((item) => item.id === taskId);
+    if (!task || task.status !== "running") return;
+    const bot = (db.settings?.larkBots || []).find((item) => item.id === task.botId && item.enabled !== false);
+    if (!bot) { task.status = "failed"; task.error = "The linked Feishu bot is no longer configured."; task.updatedAt = new Date().toISOString(); writeDb(db); return; }
+    try {
+      const outcome = await executePaovrdAssistantTask(db, task, bot);
+      await deliverPaovrdOutcome(db, bot, task, outcome);
+    } catch (error) {
+      task.status = "failed"; task.error = String(error?.message || error).slice(0, 1000); task.updatedAt = new Date().toISOString(); writeDb(db); logServerError(error);
+    }
+  }));
+}
+function publicPaovrdTask(task) {
+  return {
+    id: task.id, type: task.type, runtimeVersion: task.runtimeVersion, status: task.status, phase: task.phase,
+    goal: task.goal, agentId: task.agentId, createdAt: task.createdAt, updatedAt: task.updatedAt,
+    metrics: task.metrics, verification: task.verification,
+    pendingAction: task.pendingAction ? { toolName: task.pendingAction.toolName, risk: task.pendingAction.risk, rationale: task.pendingAction.action?.rationale || "" } : null,
+    trace: (task.trace || []).map((event) => ({ at: event.at, phase: event.phase, status: event.status, toolId: event.toolId || "", error: event.error || "" }))
+  };
+}
 function wantsCalendarAction(text) { return /(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u5165|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88).{0,12}(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386)|(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386).{0,12}(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88)/u.test(String(text || '')); }
 function calendarTaskFromText(text) { const source = String(text || '').trim(); const title = source.replace(/^(?:\u8bf7)?(?:\u5e2e\u6211)?(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u4e00\u4e2a|\u5efa\u4e00\u4e2a)(?:\u4f1a\u8bae|\u4f1a\u8bae\u65e5\u7a0b|\u65e5\u7a0b)[\uff1a:\s]*/u, '').trim() || source; return { title: title.slice(0,100), source }; }
 function calendarTaskCard(task) { return { config:{wide_screen_mode:true}, header:{title:{tag:'plain_text',content:'TONA \u65e5\u7a0b\u5f85\u786e\u8ba4'},template:'blue'}, elements:[
@@ -1769,7 +1941,7 @@ function calendarTaskCard(task) { return { config:{wide_screen_mode:true}, heade
   {tag:'action',actions:[{tag:'button',text:{tag:'plain_text',content:'\u786e\u8ba4\u7ee7\u7eed\u5904\u7406'},type:'primary',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'approve'}},{tag:'button',text:{tag:'plain_text',content:'\u6682\u4e0d\u5b89\u6392'},type:'default',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'reject'}}]}
 ]}; }
 function calendarTaskResultPost(task) { return feishuPostContent('\u65e5\u7a0b\u4efb\u52a1\u5df2\u8bb0\u5f55\uff1a'+task.title+'\n\n\u5f53\u524d\u72b6\u6001\uff1a\u7b49\u5f85\u4e2a\u4eba\u65e5\u5386\u6388\u6743\u63a5\u5165\u3002\n\n\u4f60\u53ef\u7ee7\u7eed\u8865\u5145\u53c2\u4f1a\u4eba\u3001\u65f6\u95f4\u7a97\u53e3\u548c\u4f1a\u8bae\u65f6\u957f\uff1bTONA \u4f1a\u5728\u6388\u6743\u5b8c\u6210\u540e\u751f\u6210\u5019\u9009\u65f6\u95f4\u5e76\u518d\u6b21\u8bf7\u4f60\u786e\u8ba4\u3002','\u65e5\u7a0b\u52a9\u7406'); }
-function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth','scheduled','failed'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); return {status:!enabledBots.length||!providersReady.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:providersReady.map((provider)=>provider.name),replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title,status:item.status,updatedAt:item.updatedAt}))}; }
+function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth','scheduled','running','waiting_confirmation','waiting_input','completed_with_limits','failed'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); return {status:!enabledBots.length||!providersReady.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:providersReady.map((provider)=>provider.name),replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title||item.goal||'PAOVRD 任务',status:item.status,updatedAt:item.updatedAt}))}; }
 function documentRequestEntries(db) {
   db.settings ||= {};
   db.settings.documentRequests = Array.isArray(db.settings.documentRequests) ? db.settings.documentRequests : [];
@@ -1959,6 +2131,26 @@ function workspaceDbExists(workspaceId) {
 }
 function handleFeishuCardAction(eventBody) {
   const value = cardActionValue(eventBody);
+  if (value.source === "tona_paovrd" && value.taskId) {
+    const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+    const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
+    if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast("warning", "该任务已经过期或不属于当前工作区。");
+    const db = workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => readDb());
+    const task = paovrdTaskEntries(db).find((item) => item.id === value.taskId);
+    if (!task || task.workspaceId !== requestedWorkspaceId) return skillRequestToast("warning", "该任务已经过期或不属于当前工作区。");
+    const incomingAppId = eventBody?.header?.app_id || eventBody?.app_id || "";
+    if (task.botAppId && task.botAppId !== incomingAppId) return skillRequestToast("warning", "请使用发起任务的原机器人确认操作。");
+    const operatorId = cardOperatorId(eventBody);
+    if (task.requestedBy && operatorId && task.requestedBy !== operatorId) return skillRequestToast("warning", "只有任务发起人可以确认该操作。");
+    if (task.status !== "waiting_confirmation") return skillRequestToast("info", "该任务当前状态：" + task.status + "。");
+    if (value.action === "reject") {
+      rejectPendingAction(task); workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db));
+      return skillRequestToast("info", "任务已取消，本次工具操作不会执行。");
+    }
+    approvePendingAction(task); workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db));
+    schedulePaovrdResume(requestedWorkspaceId, task.id);
+    return skillRequestToast("success", "已确认本次操作，任务将从断点继续，并在当前会话主动反馈结果。");
+  }
   if (value.source === 'tona_scheduled_reminder' && value.taskId) {
     const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID; const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
     if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast('warning','该提醒已经过期或不属于当前工作区。');
@@ -2043,6 +2235,18 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       await hydrateLarkBotIdentity(db, bot);
       if (!messageMentionsBot(db, message, bot)) return;
     }
+    const waitingTask = latestWaitingPaovrdTask(db, message, bot);
+    if (waitingTask) {
+      if (/(?:取消|停止|终止|不要继续)(?:任务|执行)?/u.test(message.text)) {
+        waitingTask.status = "cancelled"; waitingTask.error = "用户取消了任务。"; waitingTask.updatedAt = new Date().toISOString(); writeDb(db);
+        await replyFeishuMessage(larkBotToAppSettings(bot), message.messageId, "已取消上一项 PAOVRD 任务。");
+        return;
+      }
+      resumeWithUserInput(waitingTask, message.text); writeDb(db);
+      const outcome = await executePaovrdAssistantTask(db, waitingTask, bot);
+      await deliverPaovrdOutcome(db, bot, waitingTask, outcome, message.messageId);
+      return;
+    }
     const capability = parseFeishuCapabilityRequest(message.text);
     if (capability) {
       const request = createFeishuSkillRequest(db, capability, message, bot);
@@ -2089,6 +2293,12 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       task = createCollaborationTask(db, message, bot, plan);
       writeDb(db);
       await runServerManagedCollaboration(db, task, message, bot);
+      return;
+    }
+    if (!wantsFeishuDocumentRead(message.text) && shouldUsePaovrd(message.text, capabilityPlan)) {
+      const paovrdTask = createFeishuPaovrdTask(db, message, bot);
+      const outcome = await executePaovrdAssistantTask(db, paovrdTask, bot);
+      await deliverPaovrdOutcome(db, bot, paovrdTask, outcome, message.messageId);
       return;
     }
   }
@@ -2340,6 +2550,10 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     if (req.method === "GET" && pathname === "/api/model-usage") {
       return sendJson(res, 200, modelUsageSummary());
+    }
+    if (req.method === "GET" && pathname === "/api/assistant-tasks") {
+      const tasks = paovrdTaskEntries(readDb()).slice(-30).reverse().map(publicPaovrdTask);
+      return sendJson(res, 200, { tasks });
     }
     if (req.method === "GET" && pathname === "/api/runtime") {
       const db = readDb();
@@ -2694,6 +2908,20 @@ async function deliverDueAssistantTasks() {
           if (task.attempts >= 3) task.status = 'failed';
           else { task.status = 'scheduled'; task.runAt = new Date(Date.now() + 60_000).toISOString(); }
           writeDb(db);
+        }
+      }
+      const staleTask = paovrdTaskEntries(db).find((item) => item.status === "running" && Date.parse(item.updatedAt || 0) <= now - 60_000);
+      if (staleTask) {
+        const staleLockKey = `${staleTask.workspaceId || workspaceId || LEGACY_OWNER_ID}:${staleTask.id}`;
+        if (paovrdLocks.has(staleLockKey)) return;
+        const bot = (db.settings?.larkBots || []).find((item) => item.id === staleTask.botId && item.enabled !== false);
+        if (bot) {
+          try {
+            const outcome = await executePaovrdAssistantTask(db, staleTask, bot);
+            await deliverPaovrdOutcome(db, bot, staleTask, outcome);
+          } catch (error) {
+            staleTask.status = "failed"; staleTask.error = String(error?.message || error).slice(0, 1000); staleTask.updatedAt = new Date().toISOString(); writeDb(db); logServerError(error);
+          }
         }
       }
     });

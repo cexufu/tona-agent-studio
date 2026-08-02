@@ -187,7 +187,7 @@ async function refreshAssistantHealth() {
     const health = await api('/api/assistant-health');
     const labels = { ready: '\u8fd0\u884c\u6b63\u5e38', attention: '\u9700\u8981\u5904\u7406', setup_needed: '\u5c1a\u672a\u5c31\u7eea' };
     const stateClass = health.status === 'ready' ? 'enabled' : health.status === 'attention' ? 'error' : 'disabled';
-    const taskStatusLabels = { pending_confirmation: '\u7b49\u5f85\u4f60\u786e\u8ba4', awaiting_calendar_oauth: '\u7b49\u5f85\u65e5\u5386\u6388\u6743', scheduled: '\u5df2\u5b89\u6392', failed: '\u6267\u884c\u5931\u8d25' };
+    const taskStatusLabels = { pending_confirmation: '\u7b49\u5f85\u4f60\u786e\u8ba4', awaiting_calendar_oauth: '\u7b49\u5f85\u65e5\u5386\u6388\u6743', scheduled: '\u5df2\u5b89\u6392', running: '\u6b63\u5728\u6267\u884c', waiting_confirmation: '\u7b49\u5f85\u5de5\u5177\u64cd\u4f5c\u786e\u8ba4', waiting_input: '\u7b49\u5f85\u8865\u5145\u4fe1\u606f', completed_with_limits: '\u5df2\u8fbe\u8fd0\u884c\u4e0a\u9650', failed: '\u6267\u884c\u5931\u8d25' };
     const taskRows = (health.pendingTasks || []).map((task) => '<li><strong>' + escapeHtml(task.title) + '</strong><span>' + escapeHtml(taskStatusLabels[task.status] || task.status) + '</span></li>').join('');
     const failure = health.replyFailures?.[0];
     box.innerHTML = '<div class="panel-heading"><h3>\u5728\u7ebf\u52a9\u7406\u72b6\u6001</h3><button id="refreshAssistantHealthButton" type="button">\u5237\u65b0\u72b6\u6001</button></div>' +

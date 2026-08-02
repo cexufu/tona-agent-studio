@@ -353,12 +353,13 @@ const plannedSchemas = {
     outputSchema: { type: "object", required: ["artifacts"], properties: { artifacts: { type: "array" } } }
   }
 };
-const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned").map((tool) => ({ ...tool, ...plannedSchemas[tool.id] }));
+const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned").map((tool) => ({ ...tool, ...plannedSchemas[tool.id], executable: false }));
 const registeredToolIds = new Set(TOOL_REGISTRY.keys());
 const orchestrationInputSchema = { type: "object", required: ["request"], properties: { request: { type: "string", minLength: 1, maxLength: 5000 } }, additionalProperties: false };
 const orchestrationOutputSchema = { type: "object", required: ["status"], properties: { status: { type: "string", enum: ["planned", "pending_confirmation", "authorization_required", "permission_required", "completed", "failed"] }, receipt: { type: "string" } }, additionalProperties: false };
 const orchestrationTools = UNIVERSAL_CAPABILITIES.filter((tool) => !registeredToolIds.has(tool.id)).map((tool) => ({
   ...tool,
+  executable: false,
   category: "orchestration",
   approvalRisk: tool.risk,
   risk: tool.risk === "read" ? "read" : tool.id === "multi_agent_collaboration" ? "execute" : "write",
@@ -366,7 +367,10 @@ const orchestrationTools = UNIVERSAL_CAPABILITIES.filter((tool) => !registeredTo
   inputSchema: orchestrationInputSchema,
   outputSchema: orchestrationOutputSchema
 }));
-TOOL_CATALOG.splice(0, TOOL_CATALOG.length, ...[...TOOL_REGISTRY.values()].map(publicToolDefinition), ...orchestrationTools, ...plannedTools);
+const registeredTools = [...TOOL_REGISTRY.values()].map((tool) => ({ ...publicToolDefinition(tool), executable: true }));
+TOOL_CATALOG.splice(0, TOOL_CATALOG.length, ...registeredTools, ...orchestrationTools, ...plannedTools);
+
+function executableToolCatalog() { return TOOL_CATALOG.filter((tool) => tool.executable === true && tool.status === "ready"); }
 
 async function executeTool(name, input, context = {}) {
   return executeRegisteredTool(TOOL_REGISTRY, name, input, context);
@@ -405,6 +409,7 @@ module.exports = {
   readPublicWebPage,
   searchBailian,
   executeTool,
+  executableToolCatalog,
   evidenceContext,
   sourceAppendix
 };
