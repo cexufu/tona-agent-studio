@@ -17,15 +17,16 @@
           </div>
         </div>
         <nav class="nav">
-          <button class="nav-item active" data-view="quickstart">快速开始</button>
-          <button class="nav-item" data-view="studio">工作台</button>
-          <button class="nav-item" data-view="providers">模型</button>
-          <button class="nav-item" data-view="agents">角色</button>
-          <button class="nav-item" data-view="workflows">Skill Center</button>
-          <button class="nav-item" data-view="runtime">工具</button>
-          <button class="nav-item" data-view="files">文件</button>
-          <button class="nav-item" data-view="lark">飞书</button>
-          <button class="nav-item" data-view="runs">记录</button>
+          <button class="nav-item active" data-view="quickstart">问剑台</button>
+          <button class="nav-item" data-view="studio">布阵台</button>
+          <button class="nav-item" data-view="providers">内功堂</button>
+          <button class="nav-item" data-view="agents">群侠谱</button>
+          <button class="nav-item" data-view="workflows">武学阁</button>
+          <button class="nav-item" data-view="runtime">神兵坊</button>
+          <button class="nav-item" data-view="files">藏经阁</button>
+          <button class="nav-item" data-view="lark">飞鸽驿</button>
+          <button class="nav-item" data-view="tasks">江湖令</button>
+          <button class="nav-item" data-view="runs">行迹录</button>
         </nav>
         <div class="sidebar-footer">
           <span class="status-dot"></span>
@@ -39,7 +40,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">One-Click Setup</p>
-              <h2>一键准备科研 AI 助手</h2>
+              <h2>问剑台 · 快速开局</h2>
               <p class="page-subtitle">把模型 Key、飞书机器人、今天要跑的任务放到一个地方。你不用在多个页面之间来回找。</p>
             </div>
             <button class="primary" id="quickRunButton">保存并运行</button>
@@ -88,16 +89,16 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Workspace</p>
-              <h2>多角色工作台</h2>
-              <p class="page-subtitle">第一次用，按 1-2-3 来：先去“模型”填 key，再去“角色”确认每个 AI 用哪个模型，最后回这里粘贴材料运行。</p>
+              <h2>布阵台 · 多 Agent 工作流</h2>
+              <p class="page-subtitle">第一次用，按 1-2-3 来：先去“内功堂”填 Key，再去“群侠谱”确认每个 Agent 使用的模型，最后回这里粘贴材料运行。</p>
             </div>
             <button class="primary" id="runWorkflowButton">开始运行</button>
           </div>
 
           <section class="guide-strip" id="quickGuide">
-            <button class="guide-step" data-jump="providers"><span>1</span><div><strong>先填模型 Key</strong><p>点这里去模型页，选择 OpenAI / DeepSeek / Kimi / 豆包，填 API Key 并启用。</p></div></button>
-            <button class="guide-step" data-jump="agents"><span>2</span><div><strong>再确认 AI 角色</strong><p>每个角色可以用不同模型，比如 Researcher 用 Kimi，Critic 用 DeepSeek。</p></div></button>
-            <button class="guide-step" data-jump="studio"><span>3</span><div><strong>最后运行 Skill</strong><p>粘贴一段材料，选择 Skill，点“开始运行”，结果会分步骤显示。</p></div></button>
+            <button class="guide-step" data-jump="providers"><span>1</span><div><strong>先修内功</strong><p>点这里去内功堂，选择 OpenAI / DeepSeek / Kimi / 豆包，填 API Key 并启用。</p></div></button>
+            <button class="guide-step" data-jump="agents"><span>2</span><div><strong>再选同行侠客</strong><p>每个 Agent 可以使用不同模型，比如 Researcher 用 Kimi，Critic 用 DeepSeek。</p></div></button>
+            <button class="guide-step" data-jump="studio"><span>3</span><div><strong>最后布阵运行</strong><p>粘贴一段材料，选择 Skill，点“开始运行”，结果会分步骤显示。</p></div></button>
           </section>
 
           <div class="next-action" id="nextActionBox"></div>
@@ -141,7 +142,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Model Registry</p>
-              <h2>模型供应商</h2>
+              <h2>内功堂 · 模型供应商</h2>
               <p class="page-subtitle">这里放你的各种大模型 key。先点左边卡片，再在右边填 key、启用、保存、测试。</p>
             </div>
             <button class="primary" id="newProviderButton">新增模型</button>
@@ -187,37 +188,81 @@
 
         <section class="view" id="view-agents">
           <div class="topbar">
-            <div>
-              <p class="eyebrow">Agent Registry</p>
-              <h2>AI 角色</h2>
-              <p class="page-subtitle">这里是“设计 AI 员工”的地方。你填定位、目标、边界和输出格式，不需要写代码。</p>
-            </div>
-            <button class="primary" id="newAgentButton">新增角色</button>
+            <div><p class="eyebrow">Agent Team</p><h2>群侠谱 · Agent 队伍</h2><p class="page-subtitle">每个 Agent 都是一个独立运行单元：身份、Skill、工具、记忆、运行策略和飞书渠道在这里统一装配。</p></div>
+            <button class="primary" id="newAgentButton">新增 Agent</button>
           </div>
-          <section class="howto"><strong>怎么配置角色：</strong><span>1. 选左边角色。</span><span>2. 在右边选择它用哪个模型供应商。</span><span>3. 改它的任务、边界、输出格式，保存。</span></section>
-          <div class="split">
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>角色列表</h3>
-                <span>每个角色可绑定不同模型</span>
-              </div>
-              <div id="agentList" class="cards"></div>
+          <div class="agent-studio-layout">
+            <section class="panel agent-roster-panel">
+              <div class="panel-heading"><h3>Agent 列表</h3><span id="agentRosterCount"></span></div>
+              <div id="agentList" class="cards agent-cards"></div>
             </section>
-            <section class="panel">
-              <div class="panel-heading"><h3>编辑角色</h3><button class="danger" id="deleteAgentButton" type="button">删除角色</button></div>
-              <form id="agentForm" class="form-grid">
+            <section class="panel agent-editor-panel">
+              <div class="agent-editor-header">
+                <div><p class="eyebrow">Agent Profile</p><h3 id="agentEditorTitle">编辑 Agent</h3><p id="agentEditorSummary" class="meta"></p></div>
+                <div class="button-row"><button class="danger" id="deleteAgentButton" type="button">删除</button><button class="primary" id="saveAgentButton" type="submit" form="agentForm">保存 Agent</button></div>
+              </div>
+              <div class="agent-tabs" role="tablist">
+                <button type="button" class="agent-tab active" data-agent-tab="overview">概览</button>
+                <button type="button" class="agent-tab" data-agent-tab="identity">身份与规则</button>
+                <button type="button" class="agent-tab" data-agent-tab="capabilities">能力</button>
+                <button type="button" class="agent-tab" data-agent-tab="channel">飞书渠道</button>
+                <button type="button" class="agent-tab" data-agent-tab="memory">知识与记忆</button>
+                <button type="button" class="agent-tab" data-agent-tab="runtime">运行策略</button>
+                <button type="button" class="agent-tab" data-agent-tab="usage">记录与用量</button>
+              </div>
+              <form id="agentForm">
                 <input type="hidden" name="id" />
-                <label>名称<input name="name" required /></label>
-                <label>默认模型<select name="providerId" id="agentProviderSelect"></select></label>
-                <label>模型名<input name="model" required /></label>
-                <label>温度<input name="temperature" type="number" min="0" max="2" step="0.1" /></label>
-                <label class="span-2">角色定位<textarea name="role"></textarea></label>
-                <label class="span-2">风格<textarea name="style"></textarea></label>
-                <label class="span-2">目标<textarea name="goals"></textarea></label>
-                <label class="span-2">边界<textarea name="guardrails"></textarea></label>
-                <label class="span-2">输出格式<textarea name="outputFormat"></textarea></label>
-                <label class="span-2">技能，用逗号分隔<input name="skills" /></label>
-                <button class="primary span-2" type="submit">保存角色</button>
+                <section class="agent-tab-panel active" data-agent-panel="overview">
+                  <div id="agentOverview" class="agent-overview-grid"></div>
+                  <div id="agentReadiness" class="capability-readiness"></div>
+                </section>
+                <section class="agent-tab-panel" data-agent-panel="identity">
+                  <div class="form-grid">
+                    <label>名称<input name="name" required /></label><label>默认模型<select name="providerId" id="agentProviderSelect"></select></label>
+                    <label>模型名<input name="model" required /></label><label>温度<input name="temperature" type="number" min="0" max="2" step="0.1" /></label>
+                    <label class="span-2">角色定位<textarea name="role" rows="4"></textarea></label><label class="span-2">表达风格<textarea name="style" rows="3"></textarea></label>
+                    <label class="span-2">目标<textarea name="goals" rows="4"></textarea></label><label class="span-2">边界与禁止事项<textarea name="guardrails" rows="4"></textarea></label>
+                    <label class="span-2">默认输出格式<textarea name="outputFormat" rows="4"></textarea></label>
+                  </div>
+                </section>
+                <section class="agent-tab-panel" data-agent-panel="capabilities">
+                  <div class="capability-columns">
+                    <div><div class="panel-heading"><h3>Skill</h3><span>专业方法与流程</span></div><div id="agentSkillBindings" class="binding-list"></div></div>
+                    <div><div class="panel-heading"><h3>工具</h3><span>真实动作授权</span></div><div id="agentToolBindings" class="binding-list"></div></div>
+                  </div>
+                </section>
+                <section class="agent-tab-panel" data-agent-panel="channel">
+                  <div id="agentChannelStatus" class="capability-readiness"></div>
+                  <div class="form-grid">
+                    <input type="hidden" id="agentChannelBotId" />
+                    <label>机器人名称<input id="agentChannelName" placeholder="例如：科研助理机器人" /></label><label>启用<select id="agentChannelEnabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
+                    <label class="span-2">App ID<input id="agentChannelAppId" placeholder="cli_xxx" /></label><label class="span-2">App Secret<input id="agentChannelAppSecret" type="password" placeholder="留空则保留原 Secret" /></label>
+                    <label class="span-2">公网回调 URL<input id="agentChannelCallbackUrl" /></label><label class="span-2">Verification Token<input id="agentChannelVerificationToken" /></label>
+                    <label class="span-2">Encrypt Key<input id="agentChannelEncryptKey" type="password" /></label>
+                    <div class="button-row span-2"><button type="button" id="saveAgentChannelButton" class="primary">保存并绑定</button><button type="button" id="testAgentChannelButton">测试凭证</button><button type="button" id="oauthAgentChannelButton">授权个人飞书能力</button></div>
+                  </div>
+                </section>
+                <section class="agent-tab-panel" data-agent-panel="memory">
+                  <div class="form-grid">
+                    <label>记忆范围<select name="memoryScope"><option value="agent">仅当前 Agent</option><option value="conversation">仅当前会话</option><option value="workspace">工作区共享</option></select></label><label>保留天数<input name="memoryRetentionDays" type="number" min="1" max="3650" /></label>
+                    <div class="span-2 toggle-grid"><label><input name="memoryCore" type="checkbox" />核心偏好</label><label><input name="memorySemantic" type="checkbox" />事实与决策</label><label><input name="memoryTask" type="checkbox" />任务状态</label><label><input name="memoryEpisodic" type="checkbox" />历史结果</label><label><input name="memoryShortTerm" type="checkbox" />短期会话</label></div>
+                  </div>
+                  <p class="meta">记忆只作为上下文证据，不作为可执行指令。更新后的明确指令始终优先。</p>
+                </section>
+                <section class="agent-tab-panel" data-agent-panel="runtime">
+                  <div class="form-grid">
+                    <label>最大步骤<input name="runtimeMaxSteps" type="number" min="1" max="20" /></label><label>最大工具调用<input name="runtimeMaxToolCalls" type="number" min="1" max="20" /></label>
+                    <label>最大模型调用<input name="runtimeMaxModelCalls" type="number" min="2" max="30" /></label><label>最大重规划<input name="runtimeMaxReplans" type="number" min="0" max="8" /></label>
+                    <label>最长执行秒数<input name="runtimeMaxDurationSec" type="number" min="10" max="600" /></label><label>回复模式<select name="runtimeReplyMode"><option value="adaptive">自动</option><option value="quick">简短</option><option value="standard">标准</option><option value="detailed">详细</option></select></label>
+                    <label class="span-2"><input name="runtimeAllowCollaboration" type="checkbox" />允许该 Agent 发起有界多 Agent 协作</label>
+                    <label class="span-2"><input name="delegationCanDelegate" type="checkbox" />&#20801;&#35768;&#35843;&#29992;&#20854;&#20182; Agent &#20316;&#20026;&#23376;&#20351;&#32773;</label>
+                    <label>&#26368;&#22823;&#22996;&#27966;&#28145;&#24230;<input name="delegationMaxDepth" type="number" min="0" max="2" /></label><label>&#24182;&#21457;&#23376;&#20351;&#32773;<input name="delegationMaxConcurrent" type="number" min="1" max="4" /></label>
+                    <label>&#21333;&#20219;&#21153;&#26368;&#22810;&#23376;&#20351;&#32773;<input name="delegationMaxTotal" type="number" min="1" max="8" /></label>
+                    <label class="span-2">&#21487;&#35843;&#29992;&#30340; Agent<select id="agentCallableAgents" multiple size="4"></select></label>
+                    <label class="span-2">&#20801;&#35768;&#21738;&#20123; Agent &#35843;&#29992;&#25105;<select id="agentCallableByAgents" multiple size="4"></select></label>
+                  </div>
+                </section>
+                <section class="agent-tab-panel" data-agent-panel="usage"><div id="agentUsagePanel" class="agent-overview-grid"></div><div id="agentTaskSummary" class="run-list"></div></section>
               </form>
             </section>
           </div>
@@ -227,7 +272,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Capability Registry</p>
-              <h2>Skill Center</h2>
+              <h2>武学阁 · Skill 中心</h2>
               <p class="page-subtitle">把可重复调用的专业能力集中管理。每个 Skill 包含触发场景、输入类型和多角色执行步骤。</p>
             </div>
             <button id="createSkillDraftButton">AI &#29983;&#25104; Skill</button>
@@ -247,6 +292,7 @@
               <button class="danger" id="deleteWorkflowButton" type="button">&#21024;&#38500; Skill</button>
               <form id="workflowForm" class="form-grid">
                 <input type="hidden" name="id" />
+                <label>Skill &#29256;&#26412;<input name="skillVersion" value="1.0.0" /></label><label>&#21457;&#24067;&#29366;&#24577;<select name="status"><option value="draft">&#33609;&#31295;</option><option value="tested">&#24050;&#27979;&#35797;</option><option value="published">&#24050;&#21457;&#24067;</option><option value="deprecated">&#24050;&#20572;&#29992;</option></select></label>
                 <label>名称<input name="name" required /></label>
                 <label>输入类型<select name="inputType"><option value="text">文本</option><option value="lark_doc" disabled>飞书文档，后续</option></select></label>
                 <label>启用状态<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
@@ -255,8 +301,13 @@
                 <label class="span-2">&#20132;&#20184;&#35268;&#33539;<textarea name="outputContract" placeholder="&#35828;&#26126;&#26368;&#32456;&#35201;&#24471;&#21040;&#20160;&#20040;&#26679;&#30340;&#32467;&#26524;&#12290;"></textarea></label>
                 <label class="span-2">&#36136;&#37327;&#26816;&#26597;&#65292;&#27599;&#34892;&#19968;&#26465;<textarea name="qualityChecklist" placeholder="&#19981;&#32534;&#36896;&#20107;&#23454;&#10;&#26631;&#27880;&#19981;&#30830;&#23450;&#24615;&#10;&#32473;&#20986;&#21487;&#25191;&#34892;&#30340;&#19979;&#19968;&#27493;"></textarea></label>
                 <label class="span-2">触发示例，每行一句<textarea name="triggerExamples" placeholder="帮我把这份材料整理成研究简报"></textarea></label>
+                <label class="span-2">&#20309;&#26102;&#20351;&#29992;&#65288;&#27599;&#34892;&#19968;&#26465;&#65289;<textarea name="whenToUse"></textarea></label>
+                <label class="span-2">&#20309;&#26102;&#19981;&#20351;&#29992;&#65288;&#27599;&#34892;&#19968;&#26465;&#65289;<textarea name="whenNotToUse"></textarea></label>
+                <label class="span-2">&#24517;&#38656;&#36755;&#20837;&#65288;&#27599;&#34892;&#19968;&#39033;&#65289;<textarea name="requiredInputs"></textarea></label>
+                <label class="span-2">&#24517;&#38656;&#33021;&#21147; ID&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;<textarea name="requiredCapabilities"></textarea></label>
+                <label class="span-2">&#21487;&#36873;&#33021;&#21147; ID&#65288;&#27599;&#34892;&#19968;&#20010;&#65289;<textarea name="optionalCapabilities"></textarea></label>
                 <label class="span-2">步骤，每行一个：agentId | task<textarea name="steps" class="steps-textarea"></textarea></label>
-                <button class="primary span-2" type="submit">保存 Skill</button>
+                <div class="button-row span-2"><button id="preflightSkillButton" type="button">&#20381;&#36182;&#39044;&#26816;</button><button class="primary" type="submit">&#20445;&#23384; Skill</button></div><div id="skillPreflightResult" class="meta span-2"></div>
                 <label class="span-2">&#27979;&#35797;&#36755;&#20837;<textarea id="skillTestInput" placeholder="&#36755;&#20837;&#19968;&#27573;&#27169;&#25311;&#26448;&#26009;&#65307;&#27979;&#35797;&#21482;&#22312; Studio &#20869;&#36816;&#34892;&#65292;&#19981;&#20250;&#21457;&#36865;&#39134;&#20070;&#28040;&#24687;&#12290;"></textarea></label>
                 <div class="inline-actions span-2"><button id="testSkillButton" type="button">&#22312; Studio &#27979;&#35797;</button><span id="skillTestMeta" class="meta"></span></div>
                 <div id="skillTestResult" class="skill-test-result span-2"></div>
@@ -270,8 +321,8 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Agent Runtime</p>
-              <h2>通用工具与联网能力</h2>
-              <p class="page-subtitle">所有 Agent 共享同一套工具。模型负责规划调用，Runtime 负责权限、确认、真实执行和回执。</p>
+              <h2>神兵坊 · 工具与联网能力</h2>
+              <p class="page-subtitle">神兵坊管理工作区可安装能力；每个 Agent 在“群侠谱”中获得独立工具授权，Runtime 负责强制校验、确认、执行和回执。</p>
             </div>
             <button class="primary" id="saveRuntimeButton" type="button">保存工具配置</button>
           </div>
@@ -287,6 +338,10 @@
                 <label>每次来源数量<input name="maxResults" type="number" min="2" max="8" value="5" /></label>
                 <label>网页读取<select name="webReaderEnabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
                 <label>单页最大字符<input name="maxCharacters" type="number" min="2000" max="50000" value="16000" /></label>
+                <label>&#24037;&#20316;&#21306;&#32593;&#32476;&#31574;&#30053;<select name="policyNetwork"><option value="allow">&#20801;&#35768;&#20855;&#22791;&#32593;&#32476;&#26435;&#38480;&#30340;&#24037;&#20855;</option><option value="deny">&#20840;&#37096;&#31105;&#27490;</option></select></label>
+                <label>&#22806;&#37096;&#20889;&#20837;&#31574;&#30053;<select name="policyExternalWrites"><option value="confirm">&#27599;&#27425;&#30830;&#35748;</option><option value="deny">&#20840;&#37096;&#31105;&#27490;</option><option value="allow">&#25353; Tool &#21512;&#21516;&#25191;&#34892;</option></select></label>
+                <label>&#24037;&#20316;&#21306;&#32593;&#32476;&#31574;&#30053;<select name="policyNetwork"><option value="allow">&#20801;&#35768;&#20855;&#22791;&#32593;&#32476;&#26435;&#38480;&#30340;&#24037;&#20855;</option><option value="deny">&#20840;&#37096;&#31105;&#27490;</option></select></label>
+                <label>&#22806;&#37096;&#20889;&#20837;&#31574;&#30053;<select name="policyExternalWrites"><option value="confirm">&#27599;&#27425;&#30830;&#35748;</option><option value="deny">&#20840;&#37096;&#31105;&#27490;</option><option value="allow">&#25353; Tool &#21512;&#21516;&#25191;&#34892;</option></select></label>
               </form>
               <p class="meta">不限制单个任务的检索次数。只有真实发出的搜索请求才计数；10 分钟内的相同查询会复用结果，不重复消耗额度。</p>
               <div class="runtime-test">
@@ -305,7 +360,7 @@
 
         <section class="view" id="view-files">
           <div class="topbar">
-            <div><p class="eyebrow">Workspace Files</p><h2>文件与产物</h2><p class="page-subtitle">文件按当前工作区隔离，读取校验 SHA-256；产物记录 file_id、artifact_id 和版本。</p></div>
+            <div><p class="eyebrow">Workspace Files</p><h2>藏经阁 · 文件与知识</h2><p class="page-subtitle">文件按当前工作区隔离，读取校验 SHA-256；产物记录 file_id、artifact_id 和版本。</p></div>
             <button id="refreshFilesButton" type="button">刷新</button>
           </div>
           <div class="runtime-layout">
@@ -338,7 +393,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Feishu Connector</p>
-              <h2>飞书接入</h2>
+              <h2>飞鸽驿 · 飞书渠道</h2>
               <p class="page-subtitle">飞书有两种接法：群自定义机器人 Webhook 用来快速推送结果；开放平台应用机器人支持群里 @ 问答、按 App ID 路由到不同 TONA 角色。</p>
             </div>
             <button id="testLarkButton">测试发送</button>
@@ -392,6 +447,13 @@
                 <label class="span-2">App ID<input name="appId" placeholder="cli_xxx" required /></label>
                 <label class="span-2">App Secret<input name="appSecret" type="password" placeholder="留空则保留原 secret" /></label>
                 <label class="span-2">公网回调 URL<input name="publicCallbackUrl" placeholder="同一个 URL 可以给所有机器人用" /></label>
+                <div class="span-2 mode-note" id="feishuOauthPanel">
+                  <strong>飞书个人 OAuth（跟随当前角色机器人配置）</strong>
+                  <p>先保存机器人。把下面的 OAuth 回调 URL 配置到该飞书应用的安全设置，然后在这里授权个人日历。</p>
+                  <div class="copy-row"><label>OAuth 回调 URL</label><code id="feishuOauthRedirectUrl">保存机器人后生成</code><button id="copyFeishuOauthRedirectButton" type="button">复制</button></div>
+                  <div id="feishuOauthStatus" class="meta">尚未读取授权状态。</div>
+                  <button id="startFeishuOauthButton" type="button">授权当前 Agent 的飞书个人能力</button>
+                </div>
                 <label class="span-2">Verification Token<input name="verificationToken" placeholder="飞书事件订阅页面里的 Verification Token" /></label>
                 <label class="span-2">Encrypt Key<input name="encryptKey" type="password" placeholder="飞书事件加密的 Encrypt Key" /></label>
                 <label>启用<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
@@ -402,11 +464,16 @@
           </div>
         </section>
 
+        <section class="view" id="view-tasks">
+          <div class="topbar"><div><p class="eyebrow">Task Center</p><h2>江湖令 · 任务中心</h2><p class="page-subtitle">统一查看 PAOVRD、定时提醒和日历请求；可暂停提醒或取消尚未完成的任务。</p></div><button id="refreshTasksButton">刷新</button></div>
+          <section class="panel"><div class="task-filters"><button class="task-filter active" data-task-filter="active">进行中</button><button class="task-filter" data-task-filter="all">全部</button></div><div id="assistantTaskList" class="task-list"><p class="meta">正在加载任务…</p></div></section>
+        </section>
+
         <section class="view" id="view-runs">
           <div class="topbar">
             <div>
               <p class="eyebrow">Run Logger</p>
-              <h2>运行记录</h2>
+              <h2>行迹录 · 运行记录</h2>
               <p class="page-subtitle">这里看每次 Skill 的执行结果、模型使用情况和错误提示。</p>
             </div>
             <div class="button-row"><button id="runCollaborationPilotButton" class="primary">运行协作实验</button><button id="refreshRunsButton">刷新</button></div>

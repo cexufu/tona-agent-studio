@@ -2,7 +2,7 @@ const crypto = require("crypto");
 
 const RUNTIME_VERSION = "3.0";
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_limits", "failed", "cancelled"]);
-const DEFAULT_BUDGET = Object.freeze({ maxSteps: 8, maxToolCalls: 6, maxModelCalls: 10, maxReplans: 2, maxDurationMs: 120000 });
+const DEFAULT_BUDGET = Object.freeze({ maxSteps: 8, maxToolCalls: 6, maxModelCalls: 10, maxReplans: 2, maxSubagents: 4, maxDurationMs: 120000 });
 
 function nowIso(now = Date.now()) { return new Date(now).toISOString(); }
 function compactText(value, limit = 6000) {
@@ -79,7 +79,7 @@ function createPaovrdTask(input = {}) {
     userInputs: [],
     finalAnswer: "",
     trace: [{ at: createdAt, phase: "created", status: "running" }],
-    metrics: { steps: 0, toolCalls: 0, modelCalls: 0, replans: 0, noProgress: 0 },
+    metrics: { steps: 0, toolCalls: 0, modelCalls: 0, replans: 0, subagents: 0, noProgress: 0 },
     budget: { ...DEFAULT_BUDGET, ...(input.budget || {}) },
     createdAt,
     updatedAt: createdAt
@@ -112,8 +112,9 @@ function baseRules() {
 function planPrompt(task, tools) {
   return `${baseRules()}\nYou are the Plan phase of TONA PAOVRD. Decompose the goal into a short adaptive plan.\nOutput: {"summary":string,"steps":string[],"completionCriteria":string[]}. Use 1-6 steps and 1-5 objectively checkable criteria.\nGoal: ${task.goal}\nContext: ${task.context || "none"}\nAvailable tools: ${JSON.stringify(toolSummary(tools))}`;
 }
-function actionPrompt(task, tools) {
-  return `${baseRules()}\nYou are the Act phase of TONA PAOVRD. Choose exactly one next move based on the latest observations.\nOutput one of:\n{"type":"tool","toolId":string,"input":object,"rationale":string}\n{"type":"finish","rationale":string}\n{"type":"ask_user","question":string,"rationale":string}.\nDo not finish merely because one tool ran; finish only when the completion criteria can be checked. Ask one concise question only when a required input cannot be obtained with tools.\nGoal: ${task.goal}\nPlan: ${JSON.stringify(task.plan)}\nObservations: ${JSON.stringify(observationSummary(task))}\nUser follow-ups: ${JSON.stringify(task.userInputs.slice(-3))}\nAvailable tools: ${JSON.stringify(toolSummary(tools))}`;
+function actionPrompt(task, tools, agents = []) {
+  return `${baseRules()}\nYou are the Act phase of TONA PAOVRD. Choose exactly one next move based on the latest observations.\nOutput one of:\n{"type":"tool","toolId":string,"input":object,"rationale":string}\n{"type":"delegate","agentId":string,"goal":string,"payload":object,"outputSchema":object,"rationale":string}\n{"type":"finish","rationale":string}\n{"type":"ask_user","question":string,"rationale":string}.\nDo not finish merely because one tool ran; finish only when the completion criteria can be checked. Ask one concise question only when a required input cannot be obtained with tools.\nGoal: ${task.goal}\nPlan: ${JSON.stringify(task.plan)}\nObservations: ${JSON.stringify(observationSummary(task))}\nUser follow-ups: ${JSON.stringify(task.userInputs.slice(-3))}\nAvailable tools: ${JSON.stringify(toolSummary(tools))}
+Callable agents: ${JSON.stringify(agents.map((agent) => ({ id: agent.id, name: agent.name, role: agent.role, toolIds: agent.toolPolicy?.allowedToolIds || [] })))}`;
 }
 function verifyPrompt(task) {
   return `${baseRules()}\nYou are the Verify phase of TONA PAOVRD. Judge the evidence, not confidence or writing quality.\nOutput: {"passed":boolean,"summary":string,"gaps":string[],"next":"deliver|replan|ask_user","question":string}.\nA claim requiring current information needs a successful tool observation and traceable sources. A requested artifact needs an artifact identifier. Failed tool calls are not evidence.\nGoal: ${task.goal}\nCompletion criteria: ${JSON.stringify(task.plan?.completionCriteria || [])}\nObservations: ${JSON.stringify(observationSummary(task))}`;
@@ -130,8 +131,8 @@ function normalizePlan(raw) {
   const completionCriteria = (Array.isArray(raw?.completionCriteria) ? raw.completionCriteria : []).map(String).map((item) => item.slice(0, 300)).filter(Boolean).slice(0, 5);
   return { summary: String(raw?.summary || "完成用户目标并以可验证结果交付。").slice(0, 500), steps: steps.length ? steps : ["获取完成目标所需的信息", "验证结果并交付"], completionCriteria: completionCriteria.length ? completionCriteria : ["交付内容直接回应用户目标", "重要事实由工具结果支持"] };
 }
-function normalizeAction(raw, tools) {
-  const type = ["tool", "finish", "ask_user"].includes(raw?.type) ? raw.type : "finish";
+function normalizeAction(raw, tools, agents = []) {
+  const type = ["tool", "delegate", "finish", "ask_user"].includes(raw?.type) ? raw.type : "finish";
   const action = { type, rationale: String(raw?.rationale || "").slice(0, 300) };
   if (type === "tool") {
     action.toolId = String(raw.toolId || "");
@@ -139,11 +140,26 @@ function normalizeAction(raw, tools) {
     action.tool = tools.find((tool) => tool.id === action.toolId) || null;
     if (!action.tool) throw new Error(`Planner selected unavailable tool: ${action.toolId || "empty"}`);
   }
-  if (type === "ask_user") action.question = String(raw.question || "请补充完成任务所需的信息。").slice(0, 500);
+  if (type === "delegate") {
+    action.agentId = String(raw.agentId || "");
+    action.goal = String(raw.goal || "").slice(0, 2000);
+    action.payload = raw.payload && typeof raw.payload === "object" && !Array.isArray(raw.payload) ? raw.payload : {};
+    action.outputSchema = raw.outputSchema && typeof raw.outputSchema === "object" && !Array.isArray(raw.outputSchema) ? raw.outputSchema : {};
+    if (!agents.some((agent) => agent.id === action.agentId)) throw new Error("Planner selected unavailable subagent: " + (action.agentId || "empty"));
+    if (!action.goal) throw new Error("Subagent goal is required.");
+  }  if (type === "ask_user") action.question = String(raw.question || "请补充完成任务所需的信息。").slice(0, 500);
   return action;
 }
 function normalizeVerification(raw) {
   return { passed: raw?.passed === true, summary: String(raw?.summary || "").slice(0, 500), gaps: (Array.isArray(raw?.gaps) ? raw.gaps : []).map(String).map((item) => item.slice(0, 300)).slice(0, 5), next: ["deliver", "replan", "ask_user"].includes(raw?.next) ? raw.next : raw?.passed ? "deliver" : "replan", question: String(raw?.question || "").slice(0, 500) };
+}
+function toolRequiresConfirmation(tool) {
+  const policy = tool?.manifest?.policy || tool?.policy || {};
+  if (policy.confirmation === "before_execute") return true;
+  if (policy.sideEffectScope === "external") return true;
+  if (["send", "destructive"].includes(policy.operationRisk)) return true;
+  if (policy.sideEffectScope === "workspace" || ["read", "compute"].includes(policy.operationRisk)) return false;
+  return tool?.risk !== "read";
 }
 function actionFingerprint(action) { return crypto.createHash("sha256").update(action.toolId + ":" + JSON.stringify(action.input || {})).digest("hex").slice(0, 24); }
 function observationFingerprint(observation) { return crypto.createHash("sha256").update(observation.toolId + ":" + observation.status + ":" + compactText(observation.data || observation.error || "", 2000)).digest("hex").slice(0, 24); }
@@ -162,7 +178,7 @@ async function callPhaseModel(task, deps, phase, prompt) {
   return result;
 }
 function budgetReached(task, startedAt) {
-  return task.metrics.steps >= task.budget.maxSteps || task.metrics.toolCalls >= task.budget.maxToolCalls || Date.now() - startedAt >= task.budget.maxDurationMs;
+  return task.metrics.steps >= task.budget.maxSteps || task.metrics.toolCalls >= task.budget.maxToolCalls || task.metrics.subagents >= task.budget.maxSubagents || Date.now() - startedAt >= task.budget.maxDurationMs;
 }
 
 async function deliver(task, deps, limited = false) {
@@ -182,6 +198,7 @@ async function runPaovrd(task, deps) {
   if (!task || task.type !== "paovrd") throw new Error("A valid PAOVRD task is required.");
   if (TERMINAL_STATUSES.has(task.status)) return { status: task.status, task, message: task.finalAnswer };
   const tools = executableTools(deps.tools || []);
+  const agents = Array.isArray(deps.agents) ? deps.agents : [];
   const startedAt = Date.now();
   task.status = "running";
   try {
@@ -196,7 +213,7 @@ async function runPaovrd(task, deps) {
         task.approvedFingerprints.push(task.pendingAction.fingerprint);
         task.pendingAction = null;
       } else {
-        action = normalizeAction(parseJsonObject(await callPhaseModel(task, deps, "act", actionPrompt(task, tools))), tools);
+        action = normalizeAction(parseJsonObject(await callPhaseModel(task, deps, "act", actionPrompt(task, tools, agents))), tools, agents);
       }
       if (action.type === "ask_user") {
         task.status = "waiting_input"; task.pendingQuestion = action.question;
@@ -217,7 +234,21 @@ async function runPaovrd(task, deps) {
         taskEvent(task, "replan", { status: "planned", replan: task.metrics.replans }); deps.persist?.(task);
         continue;
       }
-      const fingerprint = actionFingerprint(action);
+      if (action.type === "delegate") {
+        task.metrics.steps += 1; task.metrics.subagents += 1;
+        taskEvent(task, "act", { status: "delegating", agentId: action.agentId, rationale: action.rationale }); deps.persist?.(task);
+        let observation;
+        try {
+          if (typeof deps.delegate !== "function") throw Object.assign(new Error("Subagent runtime is unavailable."), { code: "SUBAGENT_UNAVAILABLE" });
+          const child = await deps.delegate(action, { task });
+          observation = { step: task.metrics.steps, toolId: "subagent.run", agentId: action.agentId, status: child?.status === "completed" ? "success" : child?.status || "error", data: compactText(child, 6000), at: nowIso() };
+        } catch (error) {
+          observation = { step: task.metrics.steps, toolId: "subagent.run", agentId: action.agentId, status: "error", error: String(error?.message || error).slice(0, 1000), code: String(error?.code || "SUBAGENT_ERROR"), at: nowIso() };
+        }
+        task.observations.push(observation); task.observations = task.observations.slice(-20);
+        taskEvent(task, "observe", { status: observation.status, toolId: "subagent.run", agentId: action.agentId }); deps.persist?.(task);
+        continue;
+      }      const fingerprint = actionFingerprint(action);
       const sameAttempts = task.steps.slice(-4).filter((step) => step.fingerprint === fingerprint);
       const failedAttempts = sameAttempts.filter((step) => step.status === "error");
       const allowOneRecoveryRetry = sameAttempts.at(-1)?.status === "error" && failedAttempts.length < 2;
@@ -230,7 +261,7 @@ async function runPaovrd(task, deps) {
         }
         continue;
       }
-      if (action.tool.risk !== "read" && !task.approvedFingerprints.includes(fingerprint)) {
+      if (toolRequiresConfirmation(action.tool) && !task.approvedFingerprints.includes(fingerprint)) {
         task.status = "waiting_confirmation";
         task.pendingAction = { fingerprint, approved: false, action: { type: "tool", toolId: action.toolId, input: action.input, rationale: action.rationale }, risk: action.tool.risk, toolName: action.tool.name || action.toolId };
         taskEvent(task, "act", { status: "waiting_confirmation", toolId: action.toolId, risk: action.tool.risk }); deps.persist?.(task);

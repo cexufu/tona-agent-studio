@@ -84,6 +84,14 @@ class WorkspaceFileStore {
 
   list() { return this.readIndex().files.filter((record) => !record.deletedAt).map((record) => this.publicRecord(record)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); }
 
+  findArtifact(artifactId) {
+    const id = String(artifactId || "");
+    if (!/^art_[A-Za-z0-9_-]{12,80}$/.test(id)) throw new RuntimeToolError("ARTIFACT_ID_INVALID", "Invalid artifact_id.", { category: "validation" });
+    const record = this.readIndex().files.find((item) => item.artifact_id === id && !item.deletedAt);
+    if (!record || record.workspaceId !== this.workspaceId) throw new RuntimeToolError("ARTIFACT_NOT_FOUND", "Artifact not found in this workspace.", { category: "not_found", status: 404 });
+    return this.publicRecord(record);
+  }
+
   find(fileId, includeDeleted = false) {
     if (!FILE_ID_PATTERN.test(String(fileId || ""))) throw new RuntimeToolError("FILE_ID_INVALID", "Invalid file_id.", { category: "validation" });
     const record = this.readIndex().files.find((item) => item.file_id === fileId);
@@ -186,14 +194,14 @@ class WorkspaceFileStore {
 const fileTools = [
   {
     id: "file_read", name: "工作区文件读取", category: "files", risk: "read", status: "ready", description: "按 file_id 读取当前工作区内已授权的文本、Markdown、HTML、JSON 或 CSV。",
-    policy: { timeoutMs: 10000, retries: 0, idempotent: true, rateLimit: { maxCalls: 60, windowMs: 60000 } },
+    policy: { operationRisk: "read", sideEffectScope: "none", network: "deny", timeoutMs: 10000, retries: 0, idempotent: true, rateLimit: { maxCalls: 60, windowMs: 60000 } },
     inputSchema: { type: "object", additionalProperties: false, required: ["file_id"], properties: { file_id: { type: "string", pattern: "^file_[A-Za-z0-9_-]{12,80}$" }, version: { type: "integer", minimum: 1 }, maxCharacters: { type: "integer", minimum: 1000, maximum: 100000 } } },
     outputSchema: { type: "object", required: ["file", "version", "content", "truncated"], properties: { file: { type: "object" }, version: { type: "integer" }, content: { type: "string" }, truncated: { type: "boolean" } } },
     handler(input, context) { if (!context.fileStore) throw new RuntimeToolError("FILE_STORE_UNAVAILABLE", "Workspace file store is unavailable.", { category: "internal", status: 500 }); return context.fileStore.readText(input.file_id, input); }
   },
   {
     id: "artifact_generate", name: "工作区产物生成", category: "files", risk: "write", status: "ready", description: "生成 TXT、Markdown、HTML、JSON 或 CSV，并返回可追溯 artifact_id。",
-    policy: { timeoutMs: 10000, retries: 0, idempotent: true, rateLimit: { maxCalls: 30, windowMs: 60000 } },
+    policy: { operationRisk: "write", sideEffectScope: "workspace", confirmation: "never", network: "deny", timeoutMs: 10000, retries: 0, idempotent: true, rateLimit: { maxCalls: 30, windowMs: 60000 } },
     inputSchema: { type: "object", additionalProperties: false, required: ["name", "format"], properties: { name: { type: "string", minLength: 1, maxLength: 180 }, format: { enum: ["txt", "markdown", "md", "html", "json", "csv"] }, content: { type: "string", maxLength: 2000000 }, data: { type: ["array", "object", "string", "number", "boolean", "null"] }, sourceTaskId: { type: "string", maxLength: 120 }, createdBy: { type: "string", maxLength: 120 } } },
     outputSchema: {
       type: "object", required: ["file", "artifacts"],

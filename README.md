@@ -138,3 +138,7 @@ npm start
 Copyright © TONA. All rights reserved.
 
 当前未提供开源许可。仓库可访问不代表授予复制、修改、分发、部署或商业使用权；产品接入与商业授权请通过上述联系方式咨询。
+
+
+Harness implementation and governance rules: docs/HARNESS_ARCHITECTURE.md
+Optional isolated Python worker: python-runner/README.md

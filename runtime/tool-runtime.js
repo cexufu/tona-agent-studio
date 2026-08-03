@@ -3,7 +3,13 @@ const net = require("net");
 const { deterministicTools } = require("./deterministic-tools");
 const { UNIVERSAL_CAPABILITIES } = require("./capability-planner");
 const { fileTools } = require("./workspace-files");
+const { memoryTools } = require("./memory-tools");
+const { pdfTools } = require("./pdf-tools");
+const { buildIsolatedExecutorTools, executorConfig } = require("./isolated-executor-tools");
+const { createPluginHost } = require("./plugin-runtime");
 const { createToolRegistry, publicToolDefinition, executeRegisteredTool } = require("./runtime-v2");
+const { normalizeToolContract } = require("./tool-contract");
+const { pythonToolDefinition, executePythonSandbox } = require("./python-runtime");
 
 const TOOL_CATALOG = [
   {
@@ -323,7 +329,7 @@ const sourceSchema = {
     score: { type: ["number", "null"] }, publishedAt: { type: "string" }, retrievedAt: { type: "string" }
   }
 };
-const webPolicy = { timeoutMs: 35000, retries: 1, idempotent: true, rateLimit: { maxCalls: 20, windowMs: 10 * 60 * 1000 } };
+const webPolicy = { operationRisk: "read", sideEffectScope: "none", network: "allow", timeoutMs: 35000, retries: 1, idempotent: true, rateLimit: { maxCalls: 20, windowMs: 10 * 60 * 1000 } };
 const webTools = [
   {
     id: "web_search", name: "联网搜索", category: "research", risk: "read", status: "ready",
@@ -340,7 +346,23 @@ const webTools = [
     handler: (input, context) => executeToolData("web_read", input, context)
   }
 ];
-const TOOL_REGISTRY = createToolRegistry([...webTools, ...deterministicTools, ...fileTools]);
+const pythonTool = { ...pythonToolDefinition, handler: async (input, context) => {
+  const result = await executePythonSandbox(input, { ...context, limits: context.policyDecision?.effectiveLimits || context.limits, inputArtifacts: context.inputArtifacts || [] });
+  if (typeof context.persistArtifacts === "function" && result.artifacts?.length) result.artifacts = await context.persistArtifacts(result.artifacts);
+  return result;
+} };
+const isolatedExecutorTools = buildIsolatedExecutorTools();
+const PLUGIN_HOST = createPluginHost([
+  { id: "tona.web", name: "TONA Web", version: "1.0.0", scope: "universal", description: "Public web search and safe page reading.", tools: webTools },
+  { id: "tona.deterministic", name: "TONA Deterministic", version: "1.0.0", scope: "universal", description: "Date, math, unit, statistics, and structured table tools.", tools: deterministicTools },
+  { id: "tona.workspace-files", name: "TONA Workspace Files", version: "1.0.0", scope: "universal", description: "Workspace-isolated file and artifact operations.", tools: fileTools },
+  { id: "tona.pdf", name: "TONA PDF", version: "1.0.0", scope: "universal", description: "Local PDF text extraction with source traceability and OCR handoff.", tools: pdfTools },
+  { id: "tona.memory", name: "TONA Hybrid Memory", version: "1.0.0", scope: "universal", description: "Durable workspace memory with hybrid retrieval and explicit write/delete approval.", tools: memoryTools },
+  { id: "tona.python", name: "TONA Python", version: "1.0.0", scope: "universal", status: pythonTool.status, description: "Isolated Python computation with workspace artifact input and output.", tools: [pythonTool] },
+  { id: "tona.isolated-executor", name: "TONA Isolated Executor", version: "1.0.0", scope: "universal", status: executorConfig().ready ? "ready" : "configuration_required", description: "Sandbox adapters for R, SQL, document parsing, browser automation, and allowlisted MCP servers.", tools: isolatedExecutorTools.filter((tool) => tool.id !== "python_repl") }
+]);
+const PLUGIN_CATALOG = PLUGIN_HOST.publicCatalog();
+const TOOL_REGISTRY = createToolRegistry(PLUGIN_HOST.tools);
 const plannedSchemas = {
   pdf_parse: {
     policy: { timeoutMs: 30000, retries: 0, idempotent: true, rateLimit: { maxCalls: 30, windowMs: 60000 } },
@@ -353,12 +375,13 @@ const plannedSchemas = {
     outputSchema: { type: "object", required: ["artifacts"], properties: { artifacts: { type: "array" } } }
   }
 };
-const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned").map((tool) => ({ ...tool, ...plannedSchemas[tool.id], executable: false }));
+const plannedTools = TOOL_CATALOG.filter((tool) => tool.status === "planned" && !TOOL_REGISTRY.has(tool.id)).map((tool) => ({ ...tool, ...plannedSchemas[tool.id], executable: false }));
 const registeredToolIds = new Set(TOOL_REGISTRY.keys());
 const orchestrationInputSchema = { type: "object", required: ["request"], properties: { request: { type: "string", minLength: 1, maxLength: 5000 } }, additionalProperties: false };
 const orchestrationOutputSchema = { type: "object", required: ["status"], properties: { status: { type: "string", enum: ["planned", "pending_confirmation", "authorization_required", "permission_required", "completed", "failed"] }, receipt: { type: "string" } }, additionalProperties: false };
 const orchestrationTools = UNIVERSAL_CAPABILITIES.filter((tool) => !registeredToolIds.has(tool.id)).map((tool) => ({
   ...tool,
+  kind: "capability",
   executable: false,
   category: "orchestration",
   approvalRisk: tool.risk,
@@ -367,7 +390,11 @@ const orchestrationTools = UNIVERSAL_CAPABILITIES.filter((tool) => !registeredTo
   inputSchema: orchestrationInputSchema,
   outputSchema: orchestrationOutputSchema
 }));
-const registeredTools = [...TOOL_REGISTRY.values()].map((tool) => ({ ...publicToolDefinition(tool), executable: true }));
+const registeredTools = [...TOOL_REGISTRY.values()].map((tool) => {
+  const raw = { ...publicToolDefinition(tool), executable: true, kind: "tool" };
+  const manifest = normalizeToolContract(raw);
+  return { ...raw, description: manifest.description.summary, manifest };
+});
 TOOL_CATALOG.splice(0, TOOL_CATALOG.length, ...registeredTools, ...orchestrationTools, ...plannedTools);
 
 function executableToolCatalog() { return TOOL_CATALOG.filter((tool) => tool.executable === true && tool.status === "ready"); }
@@ -400,6 +427,7 @@ function sourceAppendix(result) {
 
 module.exports = {
   TOOL_CATALOG,
+  PLUGIN_CATALOG,
   normalizeRuntimeSettings,
   publicRuntimeSettings,
   runtimeCredential,

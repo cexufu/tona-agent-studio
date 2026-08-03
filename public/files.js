@@ -92,12 +92,13 @@
     if (!button) return;
     const fileId = button.dataset.fileId;
     const action = button.dataset.fileAction;
+    const current = fileState.files.find((file) => file.file_id === fileId);
     if (action === "read") {
-      const result = await request(`/api/files/${encodeURIComponent(fileId)}/read`);
-      byId("workspaceFilePreview").textContent = `${result.data.file.name} · v${result.data.version}${result.data.truncated ? " · 已截断" : ""}\n\n${result.data.content}`;
+      const isPdf = current?.mime === "application/pdf";
+      const result = await request(`/api/files/${encodeURIComponent(fileId)}/${isPdf ? "parse" : "read"}`, isPdf ? { method: "POST", body: "{}" } : {});
+      byId("workspaceFilePreview").textContent = `${result.data.file.name} · v${result.data.version}${result.data.pageCount ? ` · ${result.data.pageCount} pages` : ""}${result.data.truncated ? " · truncated" : ""}\n\n${result.data.content}`;
     }
     if (action === "rename") {
-      const current = fileState.files.find((file) => file.file_id === fileId);
       const name = window.prompt("新文件名（扩展名必须保持一致）", current?.name || "");
       if (!name) return;
       await request(`/api/files/${encodeURIComponent(fileId)}`, { method: "PATCH", body: JSON.stringify({ name }) });

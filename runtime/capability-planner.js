@@ -10,6 +10,7 @@ const ACTION_TYPES = new Set([
 
 const UNIVERSAL_CAPABILITIES = [
   { id: "web_search", name: "联网搜索", status: "ready", risk: "read", description: "Search the public web and return traceable sources." },
+  { id: "feishu_document_read", name: "读取飞书文档", status: "authorization_required", risk: "read", description: "Read one explicitly provided Feishu document after the required authorization is available." },
   { id: "feishu_document_create", name: "创建飞书文档", status: "ready", risk: "write_confirm", description: "Create a new Feishu document after requester confirmation." },
   { id: "feishu_calendar_plan", name: "日历与日程", status: "authorization_required", risk: "write_confirm", description: "Prepare a calendar action and request confirmation; actual personal calendar writing requires OAuth." },
   { id: "schedule_reminder", name: "定时提醒与主动消息", status: "ready", risk: "send_confirm", description: "Schedule one proactive reminder to the current Feishu chat." },

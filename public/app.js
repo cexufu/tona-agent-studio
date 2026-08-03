@@ -6,6 +6,9 @@ const state = {
   selectedLarkBotId: null,
   modelUsage: null,
   runtime: null,
+  assistantTasks: [],
+  currentAgentTab: "overview",
+  taskFilter: "active",
   latestFinalOutput: ""
 };
 
@@ -48,6 +51,7 @@ function setActiveView(view) {
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
   if (view === "runs") loadRuns();
+  if (view === "tasks") loadAssistantTasks();
 }
 function escapeHtml(value) {
   return String(value || "")
@@ -81,6 +85,7 @@ async function loadState() {
   state.selectedAgentId ||= state.db.agents[0]?.id;
   state.selectedWorkflowId ||= state.db.workflows[0]?.id;
   renderAll();
+  loadAssistantTasks().catch(() => {});
 }
 
 function renderAll() {
@@ -121,7 +126,8 @@ function runtimeFormPayload() {
     webReader: {
       enabled: data.webReaderEnabled === "true",
       maxCharacters: Number(data.maxCharacters)
-    }
+    },
+    policy: { network: data.policyNetwork, externalWrites: data.policyExternalWrites }
   };
 }
 
@@ -137,7 +143,9 @@ function renderRuntime() {
     dailyLimit: settings.search?.dailyLimit,
     maxResults: settings.search?.maxResults,
     webReaderEnabled: settings.webReader?.enabled,
-    maxCharacters: settings.webReader?.maxCharacters
+    maxCharacters: settings.webReader?.maxCharacters,
+    policyNetwork: state.runtime.policy?.network || "allow",
+    policyExternalWrites: state.runtime.policy?.externalWrites || "confirm"
   });
   const ready = settings.search?.ready;
   document.querySelector("#runtimeReadyBadge").textContent = ready ? "联网可用" : "需要 Search Key";
@@ -149,10 +157,21 @@ function renderRuntime() {
     "<p><strong>配置供应商：</strong>" + escapeHtml(settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>实际供应商：</strong>" + escapeHtml(settings.search?.activeProvider || settings.search?.provider || "bailian") + "</p>" +
     "<p><strong>安全策略：</strong>只允许公开 HTTP/HTTPS；阻止 localhost、内网地址和超大页面。</p>";
-  const toolStatusLabels = { ready: "可用", authorization_required: "需要个人授权", permission_required: "需要飞书权限", planned: "规划中" };
-  document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) =>
-    '<div class="tool-item"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></div><span class="pill ' + (tool.status === "ready" ? "enabled" : "") + '">' + escapeHtml(toolStatusLabels[tool.status] || tool.status || "未知") + '</span></div>'
-  ).join("");
+  const toolStatusLabels = { ready: "可用", authorized: "已授权", setup_required: "待配置执行器", authorization_required: "需要个人授权", permission_required: "需要飞书权限", configuration_required: "需要配置", planned: "规划中" };
+  document.querySelector("#runtimeToolCatalog").innerHTML = (state.runtime.tools || []).map((tool) => {
+    const manifest = tool.manifest || {};
+    const policy = manifest.policy || tool.policy || {};
+    const description = typeof tool.description === "object" ? tool.description.summary : tool.description;
+    const useWhen = manifest.description?.whenToUse || [];
+    const action = tool.action || {};
+    const actionHtml = action.type === "feishu_admin"
+      ? '<a class="button-link" target="_blank" rel="noopener" href="' + escapeHtml(action.url) + '">' + escapeHtml(action.label || "飞书开放平台") + '</a>' : "";
+    return '<div class="tool-item tool-contract"><div><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(description || '') + '</p>' +
+      '<div class="pill-row"><span class="pill">' + escapeHtml(manifest.version || '0.1.0') + '</span><span class="pill">' + escapeHtml(policy.operationRisk || tool.risk || 'read') + '</span><span class="pill">' + escapeHtml(policy.sideEffectScope || 'none') + '</span><span class="pill">网络 ' + escapeHtml(policy.network || 'deny') + '</span></div>' +
+      (useWhen.length ? '<p class="meta">适用：' + escapeHtml(useWhen.join('；')) + '</p>' : '') +
+      '<details><summary>Tool Manifest</summary><pre>' + escapeHtml(JSON.stringify(manifest, null, 2)) + '</pre></details></div>' +
+      '<div class="button-row"><span class="pill ' + (["ready", "authorized"].includes(tool.status) ? "enabled" : "") + '">' + escapeHtml(toolStatusLabels[tool.status] || tool.status || "未知") + '</span>' + actionHtml + '</div></div>';
+  }).join("");
 }
 
 async function saveRuntime() {
@@ -345,8 +364,61 @@ function renderLarkBotForm() {
     encryptKey: bot.encryptKey || "",
     enabled: String(bot.enabled !== false)
   });
+  renderFeishuOauthPanel(bot);
 }
 
+async function renderFeishuOauthPanel(bot = {}) {
+  const redirect = document.querySelector("#feishuOauthRedirectUrl");
+  const status = document.querySelector("#feishuOauthStatus");
+  const start = document.querySelector("#startFeishuOauthButton");
+  const copy = document.querySelector("#copyFeishuOauthRedirectButton");
+  if (!redirect || !status || !start || !copy) return;
+  if (!bot.id) {
+    redirect.textContent = "\u4fdd\u5b58\u673a\u5668\u4eba\u540e\u751f\u6210";
+    status.textContent = "\u8bf7\u5148\u4fdd\u5b58 App ID / Secret \u548c\u7ed1\u5b9a Agent\u3002";
+    start.disabled = true;
+    copy.disabled = true;
+    return;
+  }
+  start.disabled = true;
+  copy.disabled = true;
+  status.textContent = "\u6b63\u5728\u8bfb\u53d6\u5f53\u524d Agent \u7684\u6388\u6743\u72b6\u6001\u2026";
+  try {
+    const config = await api("/api/feishu/oauth/config?botId=" + encodeURIComponent(bot.id));
+    if (document.querySelector("#larkBotForm")?.elements.id.value !== bot.id) return;
+    state.feishuOauthConfig = config;
+    redirect.textContent = config.redirectUri;
+    const users = (config.authorizations || []).map((item) => item.name || item.userOpenId).filter(Boolean);
+    status.textContent = config.connected ? "\u5df2\u6388\u6743\uff1a" + users.join("\u3001") : "\u5c1a\u672a\u6388\u6743\u4e2a\u4eba\u98de\u4e66\u80fd\u529b\u3002";
+    start.textContent = config.connected ? "\u91cd\u65b0\u6388\u6743\u5f53\u524d Agent" : "\u6388\u6743\u5f53\u524d Agent \u7684\u98de\u4e66\u4e2a\u4eba\u80fd\u529b";
+    start.disabled = false;
+    copy.disabled = false;
+  } catch (error) {
+    redirect.textContent = "\u65e0\u6cd5\u751f\u6210";
+    status.textContent = error.message;
+  }
+}
+
+async function startFeishuOauthForCurrentBot() {
+  const botId = document.querySelector("#larkBotForm")?.elements.id.value;
+  if (!botId) return toast("\u8bf7\u5148\u4fdd\u5b58\u5f53\u524d\u89d2\u8272\u673a\u5668\u4eba\u3002");
+  const button = document.querySelector("#startFeishuOauthButton");
+  button.disabled = true;
+  try {
+    const result = await api("/api/feishu/oauth/start", { method: "POST", body: JSON.stringify({ botId }) });
+    window.location.assign(result.authorizationUrl);
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+}
+
+async function copyFeishuOauthRedirect() {
+  const value = state.feishuOauthConfig?.redirectUri || "";
+  if (!value) return toast("\u8bf7\u5148\u4fdd\u5b58\u5e76\u9009\u4e2d\u89d2\u8272\u673a\u5668\u4eba\u3002");
+  await navigator.clipboard.writeText(value);
+  toast("OAuth \u56de\u8c03 URL \u5df2\u590d\u5236\u3002");
+}
 function newLarkBot() {
   state.selectedLarkBotId = null;
   const form = document.querySelector("#larkBotForm");
@@ -363,6 +435,7 @@ function newLarkBot() {
     enabled: "true"
   });
   renderLarkBots();
+  renderFeishuOauthPanel({});
 }
 
 async function saveLarkBot(event) {
@@ -500,33 +573,83 @@ function renderAgentProviderSelect() {
   )).join("");
 }
 
-function renderAgents() {
-  $("#agentList").innerHTML = state.db.agents.map((agent) => {
-    const provider = state.db.providers.find((item) => item.id === agent.providerId);
-    return `
-      <div class="card ${agent.id === state.selectedAgentId ? "selected" : ""}" data-agent-id="${agent.id}">
-        <strong>${escapeHtml(agent.name)}</strong>
-        <div class="meta">${escapeHtml(agent.role)}</div>
-        <div class="pill-row">
-          <span class="pill">${escapeHtml(provider?.name || "No provider")}</span>
-          <span class="pill">${escapeHtml(agent.model)}</span>
-        </div>
-      </div>
-    `;
-  }).join("");
-
-  $$("[data-agent-id]").forEach((card) => {
-    card.addEventListener("click", () => {
-      state.selectedAgentId = card.dataset.agentId;
-      renderAgents();
-      renderAgentForm();
-    });
-  });
+function currentAgent() { return state.db.agents.find((item) => item.id === state.selectedAgentId) || null; }
+function agentBot(agentId) { return (state.db.settings?.larkBots || []).find((bot) => bot.agentId === agentId) || null; }
+function setChecked(name, value) { const field = document.querySelector('#agentForm [name="' + name + '"]'); if (field) field.checked = value !== false; }
+function setActiveAgentTab(tab) {
+  state.currentAgentTab = tab || "overview";
+  document.querySelectorAll("[data-agent-tab]").forEach((button) => button.classList.toggle("active", button.dataset.agentTab === state.currentAgentTab));
+  document.querySelectorAll("[data-agent-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.agentPanel === state.currentAgentTab));
 }
-
+function renderAgents() {
+  const list = document.querySelector("#agentList");
+  document.querySelector("#agentRosterCount").textContent = state.db.agents.length + " 个";
+  list.innerHTML = state.db.agents.map((agent) => {
+    const provider = state.db.providers.find((item) => item.id === agent.providerId);
+    const bot = agentBot(agent.id); const skills = (agent.skillBindings || []).filter((item) => item.enabled !== false).length; const tools = agent.toolPolicy?.allowedToolIds?.length || 0;
+    return '<div class="card ' + (agent.id === state.selectedAgentId ? 'selected' : '') + '" data-agent-id="' + escapeHtml(agent.id) + '">' +
+      '<strong>' + escapeHtml(agent.name) + '</strong><div class="meta">' + escapeHtml(agent.role) + '</div><div class="pill-row">' +
+      '<span class="pill">' + escapeHtml(provider?.name || '未绑定模型') + '</span><span class="pill">' + skills + ' Skill</span><span class="pill">' + tools + ' 工具</span>' +
+      '<span class="pill ' + (bot?.enabled !== false && bot?.appId ? 'enabled' : '') + '">' + (bot?.appId ? '飞书已绑定' : '飞书未绑定') + '</span></div></div>';
+  }).join("");
+  document.querySelectorAll("[data-agent-id]").forEach((card) => card.addEventListener("click", () => { state.selectedAgentId = card.dataset.agentId; state.currentAgentTab = "overview"; renderAgents(); renderAgentForm(); }));
+}
+function renderAgentBindings(agent) {
+  const skillIds = new Set((agent.skillBindings || []).filter((item) => item.enabled !== false).map((item) => item.skillId));
+  document.querySelector("#agentSkillBindings").innerHTML = state.db.workflows.map((skill) => '<label class="binding-item"><input type="checkbox" data-agent-skill="' + escapeHtml(skill.id) + '" ' + (skillIds.has(skill.id) ? 'checked' : '') + ' /><span><strong>' + escapeHtml(skill.name) + '</strong><p>' + escapeHtml(skill.description) + '</p></span><span class="pill">' + (skill.system ? '系统' : skill.builtIn ? '内置' : '自定义') + '</span></label>').join("");
+  const allowed = new Set(agent.toolPolicy?.allowedToolIds || []);
+  document.querySelector("#agentToolBindings").innerHTML = (state.runtime?.tools || []).map((tool) => '<label class="binding-item"><input type="checkbox" data-agent-tool="' + escapeHtml(tool.id) + '" ' + (allowed.has(tool.id) ? 'checked' : '') + ' ' + (tool.status === 'planned' ? 'disabled' : '') + ' /><span><strong>' + escapeHtml(tool.name) + '</strong><p>' + escapeHtml(tool.description) + '</p></span><span class="pill ' + (['ready','authorized'].includes(tool.status) ? 'enabled' : '') + '">' + escapeHtml(tool.status) + '</span></label>').join("");
+}
+function renderAgentChannel(agent) {
+  const bot = agentBot(agent.id);
+  document.querySelector("#agentChannelBotId").value = bot?.id || ""; document.querySelector("#agentChannelName").value = bot?.name || (agent.name ? agent.name + "机器人" : "");
+  document.querySelector("#agentChannelEnabled").value = String(bot?.enabled !== false); document.querySelector("#agentChannelAppId").value = bot?.appId || ""; document.querySelector("#agentChannelAppSecret").value = "";
+  document.querySelector("#agentChannelCallbackUrl").value = bot?.publicCallbackUrl || state.db.settings?.larkPublicCallbackUrl || ""; document.querySelector("#agentChannelVerificationToken").value = ""; document.querySelector("#agentChannelEncryptKey").value = "";
+  const status = !bot?.appId ? "尚未连接飞书。填写应用凭证后，该机器人会直接绑定当前 Agent。" : bot.enabled === false ? "飞书机器人已配置但处于停用状态。" : "飞书应用已绑定当前 Agent。请完成权限、事件订阅和个人 OAuth 检查。";
+  document.querySelector("#agentChannelStatus").innerHTML = '<strong>' + (bot?.appId ? '连接状态' : '开始接入') + '</strong><p>' + escapeHtml(status) + '</p><span id="agentOauthStatus" class="meta"></span>';
+  if (bot?.id) renderAgentOauthStatus(bot.id);
+}
+async function renderAgentOauthStatus(botId) {
+  const box = document.querySelector("#agentOauthStatus");
+  if (!box || !botId) return;
+  box.textContent = "正在读取个人 OAuth 状态…";
+  try {
+    const config = await api("/api/feishu/oauth/config?botId=" + encodeURIComponent(botId));
+    const users = (config.authorizations || []).map((item) => item.name || item.userOpenId).filter(Boolean);
+    box.textContent = config.connected ? "个人 OAuth 已授权：" + users.join("、") : "尚未授权个人日历能力；外部写入仍会保留计划并等待授权。";
+  } catch (error) { box.textContent = error.message; }
+}
+function renderAgentOverview(agent) {
+  const bot = agentBot(agent.id); const skills = (agent.skillBindings || []).filter((item) => item.enabled !== false); const tools = agent.toolPolicy?.allowedToolIds || [];
+  document.querySelector("#agentOverview").innerHTML = [[skills.length,'已启用 Skill'],[tools.length,'已授权工具'],[bot?.appId ? '已连接' : '未连接','飞书渠道'],[agent.memoryPolicy?.scope || 'agent','记忆范围']].map(([value,label]) => '<div class="agent-stat"><strong>' + escapeHtml(value) + '</strong><span>' + escapeHtml(label) + '</span></div>').join('');
+  const provider = state.db.providers.find((item) => item.id === agent.providerId); const missing = [];
+  if (!provider?.enabled || !provider?.apiKey) missing.push('模型未就绪'); if (!skills.length) missing.push('尚未分配 Skill'); if (!tools.length) missing.push('尚未授权工具'); if (!bot?.appId) missing.push('飞书未连接');
+  const allowed = new Set(tools); const dependencyGaps = skills.flatMap((binding) => { const skill = state.db.workflows.find((item) => item.id === binding.skillId); return (skill?.requiredCapabilities || []).filter((id) => !allowed.has(id)).map((id) => (skill?.name || binding.skillId) + ' 缺少 ' + id); });
+  document.querySelector("#agentReadiness").innerHTML = '<strong>' + (!missing.length && !dependencyGaps.length ? 'Agent 已准备好' : '仍需完成配置') + '</strong><p>' + escapeHtml([...missing,...dependencyGaps].join('；') || '身份、能力和渠道配置完整。') + '</p>';
+}
+function renderAgentUsage(agent) {
+  const recent = (state.modelUsage?.recent || []).filter((item) => item.agentId === agent.id); const tasks = (state.assistantTasks || []).filter((item) => item.agentId === agent.id);
+  const tokens = recent.reduce((sum,item) => sum + (Number(item.totalTokens)||0),0);
+  document.querySelector("#agentUsagePanel").innerHTML = [[recent.length,'近期模型请求'],[tokens.toLocaleString('zh-CN'),'近期 Token'],[tasks.length,'关联任务'],[tasks.filter((item)=>!['completed','sent','failed','cancelled'].includes(item.status)).length,'进行中']].map(([value,label]) => '<div class="agent-stat"><strong>' + escapeHtml(value) + '</strong><span>' + escapeHtml(label) + '</span></div>').join('');
+  document.querySelector("#agentTaskSummary").innerHTML = tasks.slice(0,8).map((task) => '<div class="task-card"><div><h3>' + escapeHtml(task.title || task.goal || task.type) + '</h3><p>' + escapeHtml(task.status) + ' · ' + escapeHtml(task.updatedAt || '') + '</p></div></div>').join('') || '<p class="meta">暂无该 Agent 的任务记录。</p>';
+}
+function renderAgentDelegation(agent) {
+  const callable = new Set(agent.delegationPolicy?.callableAgentIds || []);
+  const callableBy = new Set(agent.delegationPolicy?.callableByAgentIds || []);
+  const options = (selected) => state.db.agents.filter((item) => item.id !== agent.id).map((item) =>
+    '<option value="' + escapeHtml(item.id) + '" ' + (selected.has(item.id) ? 'selected' : '') + '>' + escapeHtml(item.name) + ' · ' + escapeHtml(item.role || item.id) + '</option>'
+  ).join('');
+  const targets = document.querySelector('#agentCallableAgents');
+  const callers = document.querySelector('#agentCallableByAgents');
+  if (targets) targets.innerHTML = options(callable);
+  if (callers) callers.innerHTML = options(callableBy);
+}
 function renderAgentForm() {
-  const agent = state.db.agents.find((item) => item.id === state.selectedAgentId) || {};
-  setForm($("#agentForm"), agent);
+  const existing = currentAgent(); const defaults = { id:"",name:"",providerId:state.db.providers[0]?.id||"",model:state.db.providers[0]?.defaultModel||"",temperature:0.3,role:"",style:"",goals:"",guardrails:"",outputFormat:"",skillBindings:state.db.workflows.filter((item)=>item.system).map((item)=>({skillId:item.id,enabled:true})),toolPolicy:{allowedToolIds:(state.runtime?.tools||[]).filter((item)=>item.status!=="planned").map((item)=>item.id)},memoryPolicy:{scope:"agent",core:true,semantic:true,task:true,episodic:true,shortTerm:true,retentionDays:90},runtimePolicy:{maxSteps:8,maxToolCalls:6,maxModelCalls:10,maxReplans:2,maxDurationMs:120000,allowCollaboration:true,replyMode:"adaptive"},delegationPolicy:{canDelegate:true,callableAgentIds:[],callableByAgentIds:[],maxDepth:1,maxConcurrentChildren:2,maxTotalChildren:4} };
+  const agent = existing || defaults; document.querySelector("#agentEditorTitle").textContent = agent.name || "新建 Agent"; document.querySelector("#agentEditorSummary").textContent = agent.role || "从身份、能力和渠道开始配置。";
+  setForm(document.querySelector("#agentForm"), { ...agent, memoryScope:agent.memoryPolicy?.scope||'agent',memoryRetentionDays:agent.memoryPolicy?.retentionDays||90,runtimeMaxSteps:agent.runtimePolicy?.maxSteps||8,runtimeMaxToolCalls:agent.runtimePolicy?.maxToolCalls||6,runtimeMaxModelCalls:agent.runtimePolicy?.maxModelCalls||10,runtimeMaxReplans:agent.runtimePolicy?.maxReplans??2,runtimeMaxDurationSec:Math.round((agent.runtimePolicy?.maxDurationMs||120000)/1000),runtimeReplyMode:agent.runtimePolicy?.replyMode||'adaptive',delegationMaxDepth:agent.delegationPolicy?.maxDepth??1,delegationMaxConcurrent:agent.delegationPolicy?.maxConcurrentChildren||2,delegationMaxTotal:agent.delegationPolicy?.maxTotalChildren||4 });
+  setChecked('memoryCore',agent.memoryPolicy?.core); setChecked('memorySemantic',agent.memoryPolicy?.semantic); setChecked('memoryTask',agent.memoryPolicy?.task); setChecked('memoryEpisodic',agent.memoryPolicy?.episodic); setChecked('memoryShortTerm',agent.memoryPolicy?.shortTerm); setChecked('runtimeAllowCollaboration',agent.runtimePolicy?.allowCollaboration); setChecked('delegationCanDelegate',agent.delegationPolicy?.canDelegate); renderAgentDelegation(agent);
+  renderAgentBindings(agent); renderAgentChannel(agent); renderAgentOverview(agent); renderAgentUsage(agent); setActiveAgentTab(state.currentAgentTab);
 }
 
 function renderWorkflows() {
@@ -581,7 +704,14 @@ function renderWorkflowForm() {
   setForm($("#workflowForm"), {
     ...workflow,
     triggerExamples: (workflow.triggerExamples || []).join("\n"),
+    whenToUse: (workflow.whenToUse || []).join("\n"),
+    whenNotToUse: (workflow.whenNotToUse || []).join("\n"),
+    requiredInputs: (workflow.requiredInputs || []).join("\n"),
+    requiredCapabilities: (workflow.requiredCapabilities || []).join("\n"),
+    optionalCapabilities: (workflow.optionalCapabilities || []).join("\n"),
     qualityChecklist: (workflow.qualityChecklist || []).join("\n"),
+    skillVersion: workflow.skillVersion || "1.0.0",
+    status: workflow.status || (workflow.enabled === false ? "draft" : "published"),
     enabled: String(workflow.enabled !== false),
     steps: workflowStepsToText(workflow)
   });
@@ -600,14 +730,16 @@ async function saveProvider(event) {
 }
 
 async function saveAgent(event) {
-  event.preventDefault();
-  const data = formData(event.currentTarget);
+  event.preventDefault(); const form = event.currentTarget; const data = formData(form);
   data.temperature = Number(data.temperature || 0.3);
-  data.skills = data.skills.split(",").map((item) => item.trim()).filter(Boolean);
-  const result = await api("/api/agents", { method: "POST", body: JSON.stringify(data) });
-  state.selectedAgentId = result.agent.id;
-  await loadState();
-  toast("角色已保存");
+  data.skillBindings = Array.from(document.querySelectorAll("[data-agent-skill]:checked")).map((input,index) => ({ skillId:input.dataset.agentSkill,enabled:true,priority:50+index }));
+  data.skills = data.skillBindings.map((item) => item.skillId);
+  data.toolPolicy = { mode:"selected", allowedToolIds:Array.from(document.querySelectorAll("[data-agent-tool]:checked")).map((input)=>input.dataset.agentTool) };
+  data.memoryPolicy = { scope:data.memoryScope,retentionDays:Number(data.memoryRetentionDays||90),core:form.elements.memoryCore.checked,semantic:form.elements.memorySemantic.checked,task:form.elements.memoryTask.checked,episodic:form.elements.memoryEpisodic.checked,shortTerm:form.elements.memoryShortTerm.checked };
+  data.runtimePolicy = { maxSteps:Number(data.runtimeMaxSteps||8),maxToolCalls:Number(data.runtimeMaxToolCalls||6),maxModelCalls:Number(data.runtimeMaxModelCalls||10),maxReplans:Number(data.runtimeMaxReplans||0),maxDurationMs:Number(data.runtimeMaxDurationSec||120)*1000,allowCollaboration:form.elements.runtimeAllowCollaboration.checked,replyMode:data.runtimeReplyMode };
+  data.delegationPolicy = { canDelegate:form.elements.delegationCanDelegate.checked,callableAgentIds:Array.from(document.querySelectorAll("#agentCallableAgents option:checked")).map((item)=>item.value),callableByAgentIds:Array.from(document.querySelectorAll("#agentCallableByAgents option:checked")).map((item)=>item.value),maxDepth:Number(data.delegationMaxDepth||1),maxConcurrentChildren:Number(data.delegationMaxConcurrent||2),maxTotalChildren:Number(data.delegationMaxTotal||4) };
+  for (const key of Object.keys(data)) if (/^(memory|runtime|delegation)(Scope|Retention|Max|Reply|Allow|Can|Core|Semantic|Task|Episodic|Short)/.test(key)) delete data[key];
+  const result = await api("/api/agents", { method:"POST", body:JSON.stringify(data) }); state.selectedAgentId = result.agent.id; await loadState(); state.currentAgentTab = "overview"; renderAgentForm(); toast("Agent 已保存");
 }
 
 async function deleteSelectedAgent() {
@@ -626,16 +758,42 @@ async function deleteSelectedAgent() {
   }
 }
 
-async function createSkillDraft() { const request=window.prompt('\u7528\u4e00\u53e5\u8bdd\u8bf4\u660e\u4f60\u60f3\u91cd\u590d\u4f7f\u7528\u7684\u5de5\u4f5c\u6d41\u7a0b\u3002'); if(!request?.trim())return; const button=document.querySelector('#createSkillDraftButton');button.disabled=true;try{const result=await api('/api/skills/draft',{method:'POST',body:JSON.stringify({request})});state.selectedWorkflowId=null;setForm(document.querySelector('#workflowForm'),{...result.skill,triggerExamples:(result.skill.triggerExamples||[]).join('\\n'),steps:workflowStepsToText(result.skill),enabled:'true'});document.querySelector('#skillTestInput').value=request;toast('\u5df2\u751f\u6210 Skill \u8349\u6848\uff0c\u4fee\u6539\u540e\u4fdd\u5b58\u5373\u53ef\u3002');}catch(error){toast(error.message);}finally{button.disabled=false;} }
+async function createSkillDraft() { const request=window.prompt('\u7528\u4e00\u53e5\u8bdd\u8bf4\u660e\u4f60\u60f3\u91cd\u590d\u4f7f\u7528\u7684\u5de5\u4f5c\u6d41\u7a0b\u3002'); if(!request?.trim())return; const button=document.querySelector('#createSkillDraftButton');button.disabled=true;try{const result=await api('/api/skills/draft',{method:'POST',body:JSON.stringify({request})});state.selectedWorkflowId=null;setForm(document.querySelector('#workflowForm'),{...result.skill,triggerExamples:(result.skill.triggerExamples||[]).join('\\n'),steps:workflowStepsToText(result.skill),status:'draft',skillVersion:result.skill.skillVersion||'0.1.0',whenToUse:(result.skill.whenToUse||[]).join('\\n'),whenNotToUse:(result.skill.whenNotToUse||[]).join('\\n'),requiredInputs:(result.skill.requiredInputs||[]).join('\\n'),requiredCapabilities:(result.skill.requiredCapabilities||[]).join('\\n'),optionalCapabilities:(result.skill.optionalCapabilities||[]).join('\\n'),qualityChecklist:(result.skill.qualityChecklist||[]).join('\\n'),enabled:'true'});document.querySelector('#skillTestInput').value=request;toast('\u5df2\u751f\u6210 Skill \u8349\u6848\uff0c\u4fee\u6539\u540e\u4fdd\u5b58\u5373\u53ef\u3002');}catch(error){toast(error.message);}finally{button.disabled=false;} }
 async function testSkill() { const skillId=document.querySelector('#workflowForm').elements.id.value||state.selectedWorkflowId;const input=document.querySelector('#skillTestInput').value.trim();if(!skillId)return toast('\u8bf7\u5148\u4fdd\u5b58\u8fd9\u4e2a Skill\uff0c\u518d\u6d4b\u8bd5\u3002');if(!input)return toast('\u8bf7\u8f93\u5165\u6d4b\u8bd5\u6750\u6599\u3002');const button=document.querySelector('#testSkillButton'),meta=document.querySelector('#skillTestMeta'),box=document.querySelector('#skillTestResult');button.disabled=true;meta.textContent='\u6b63\u5728 Studio \u6c99\u76d2\u8fd0\u884c\uff0c\u4e0d\u4f1a\u53d1\u9001\u98de\u4e66\u6d88\u606f\u2026';box.innerHTML='';try{const run=await api('/api/skills/test',{method:'POST',body:JSON.stringify({skillId,input})});meta.textContent='\u6d4b\u8bd5\u5b8c\u6210\uff1a'+run.status+' / '+(run.steps||[]).length+' \u6b65';box.innerHTML='<pre>'+escapeHtml(run.finalOutput||'\u6ca1\u6709\u4ea7\u51fa\u5185\u5bb9\u3002')+'</pre>';}catch(error){meta.textContent=error.message;toast(error.message);}finally{button.disabled=false;} }
-async function saveWorkflow(event) {
-  event.preventDefault();
-  const data = formData(event.currentTarget);
+function skillFormPayload(form = document.querySelector("#workflowForm")) {
+  const data = formData(form);
+  const list = (value) => String(value || "").split("\n").map((item) => item.trim()).filter(Boolean);
   data.steps = textToWorkflowSteps(data.steps);
-  data.qualityChecklist = String(data.qualityChecklist || "").split("\n").map((item) => item.trim()).filter(Boolean);
-  data.triggerExamples = data.triggerExamples.split("\n").map((item) => item.trim()).filter(Boolean);
+  data.qualityChecklist = list(data.qualityChecklist);
+  data.triggerExamples = list(data.triggerExamples);
+  data.whenToUse = list(data.whenToUse);
+  data.whenNotToUse = list(data.whenNotToUse);
+  data.requiredInputs = list(data.requiredInputs);
+  data.requiredCapabilities = list(data.requiredCapabilities);
+  data.optionalCapabilities = list(data.optionalCapabilities);
   data.enabled = data.enabled === "true";
   data.outputMode = "markdown";
+  return data;
+}
+
+async function preflightSkill() {
+  const box = document.querySelector("#skillPreflightResult");
+  try {
+    const result = await api("/api/skills/preflight", { method: "POST", body: JSON.stringify({ skill: skillFormPayload() }) });
+    const lines = [...(result.errors || []).map((item) => "错误：" + item), ...(result.warnings || []).map((item) => "提醒：" + item)];
+    box.textContent = result.ok ? (lines.join("；") || "依赖预检通过，可以测试或发布。") : lines.join("；");
+    box.className = "meta span-2 " + (result.ok ? "success-text" : "error-text");
+    return result;
+  } catch (error) { box.textContent = error.message; throw error; }
+}
+
+async function saveWorkflow(event) {
+  event.preventDefault();
+  const data = skillFormPayload(event.currentTarget);
+  if (data.status === "published") {
+    const preflight = await preflightSkill();
+    if (!preflight.ok) return toast("Skill 依赖预检未通过");
+  }
   const result = await api("/api/skills", { method: "POST", body: JSON.stringify(data) });
   state.selectedWorkflowId = result.skill.id;
   await loadState();
@@ -808,6 +966,40 @@ function bindIfPresent(selector, event, handler) {
   if (element) element.addEventListener(event, handler);
 }
 
+async function saveAgentChannel() {
+  const agent = currentAgent(); if (!agent) return toast("请先保存 Agent，再连接飞书。"); const appId = document.querySelector("#agentChannelAppId").value.trim(); if (!appId) return toast("请填写 App ID");
+  const body = { id:document.querySelector("#agentChannelBotId").value,name:document.querySelector("#agentChannelName").value||agent.name+'机器人',agentId:agent.id,appId,appSecret:document.querySelector("#agentChannelAppSecret").value,publicCallbackUrl:document.querySelector("#agentChannelCallbackUrl").value,verificationToken:document.querySelector("#agentChannelVerificationToken").value,encryptKey:document.querySelector("#agentChannelEncryptKey").value,enabled:document.querySelector("#agentChannelEnabled").value==='true' };
+  const result = await api('/api/lark-bots',{method:'POST',body:JSON.stringify(body)}); state.selectedLarkBotId=result.bot.id; await loadState(); state.currentAgentTab='channel'; renderAgentForm(); toast('飞书渠道已绑定当前 Agent');
+}
+async function testAgentChannel() { const botId=document.querySelector('#agentChannelBotId').value; if(!botId)return toast('请先保存飞书连接'); try{await api('/api/lark-bot-test',{method:'POST',body:JSON.stringify({id:botId})});toast('飞书凭证测试通过');}catch(error){toast(error.message);} }
+async function oauthAgentChannel() {
+  const botId = document.querySelector("#agentChannelBotId")?.value;
+  if (!botId) return toast("请先保存并绑定飞书机器人。");
+  try {
+    const result = await api("/api/feishu/oauth/start", { method: "POST", body: JSON.stringify({ botId }) });
+    window.location.assign(result.authorizationUrl);
+  } catch (error) { toast(error.message); }
+}
+function taskIsActive(task){return !['completed','completed_with_limits','sent','failed','cancelled','rejected','resume_failed'].includes(task.status);}
+async function loadAssistantTasks(){try{const result=await api('/api/assistant-tasks');state.assistantTasks=result.tasks||[];renderAssistantTasks();if(currentAgent())renderAgentUsage(currentAgent());}catch(error){const box=document.querySelector('#assistantTaskList');if(box)box.innerHTML='<p class="meta">'+escapeHtml(error.message)+'</p>';}}
+function renderAssistantTasks(){
+  const box=document.querySelector('#assistantTaskList'); if(!box)return;
+  const all=state.assistantTasks||[]; const visible=all.filter((task)=>state.taskFilter==='all'||taskIsActive(task));
+  const byParent=new Map();
+  for(const task of visible){const key=task.parentTaskId||'';if(!byParent.has(key))byParent.set(key,[]);byParent.get(key).push(task);}
+  const renderTask=(task,depth=0)=>{
+    const canPause=task.type==='scheduled_reminder'&&task.status==='scheduled',canResume=task.type==='scheduled_reminder'&&task.status==='paused',canCancel=taskIsActive(task);
+    const metrics=task.metrics||{}; const metricText=[metrics.steps!=null?'步骤 '+metrics.steps:'',metrics.toolCalls!=null?'工具 '+metrics.toolCalls:'',metrics.modelCalls!=null?'模型 '+metrics.modelCalls:'',metrics.subagents!=null?'子使者 '+metrics.subagents:''].filter(Boolean).join(' · ');
+    const output=task.output?.summary||task.error||'';
+    const card='<article class="task-card task-depth-'+Math.min(depth,2)+'"><div><h3>'+escapeHtml(task.title||task.goal||task.intent||task.type)+'</h3><p>'+escapeHtml(task.type)+' · '+escapeHtml(task.status)+(task.runAt?' · '+escapeHtml(new Date(task.runAt).toLocaleString('zh-CN')):'')+'</p><div class="pill-row"><span class="pill">'+escapeHtml(task.agentId||'未指定 Agent')+'</span>'+(task.parentAgentId?'<span class="pill">由 '+escapeHtml(task.parentAgentId)+' 委派</span>':'')+(task.phase?'<span class="pill">'+escapeHtml(task.phase)+'</span>':'')+'</div>'+(metricText?'<p class="meta">'+escapeHtml(metricText)+'</p>':'')+(output?'<p class="meta">'+escapeHtml(output.slice(0,300))+'</p>':'')+'</div><div class="button-row">'+(canPause?'<button data-task-action="pause" data-task-id="'+escapeHtml(task.id)+'">暂停</button>':'')+(canResume?'<button data-task-action="resume" data-task-id="'+escapeHtml(task.id)+'">恢复</button>':'')+(canCancel?'<button class="danger" data-task-action="cancel" data-task-id="'+escapeHtml(task.id)+'">取消</button>':'')+'</div></article>';
+    return card+(byParent.get(task.id)||[]).map((child)=>renderTask(child,depth+1)).join('');
+  };
+  const roots=visible.filter((task)=>!task.parentTaskId||!visible.some((item)=>item.id===task.parentTaskId));
+  box.innerHTML=roots.map((task)=>renderTask(task)).join('')||'<p class="meta">当前没有匹配的任务。</p>';
+  box.querySelectorAll('[data-task-action]').forEach((button)=>button.addEventListener('click',()=>updateAssistantTask(button.dataset.taskId,button.dataset.taskAction)));
+}
+async function updateAssistantTask(id,action){try{await api('/api/assistant-tasks/'+encodeURIComponent(id)+'/action',{method:'POST',body:JSON.stringify({action})});await loadAssistantTasks();toast('任务状态已更新');}catch(error){toast(error.message);}}
+
 function bindEvents() {
   $$(".nav-item").forEach((button) => {
     button.addEventListener("click", () => {
@@ -841,16 +1033,25 @@ function bindEvents() {
   bindIfPresent("#providerForm", "submit", saveProvider);
   bindIfPresent("#agentForm", "submit", saveAgent);
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);
+  bindIfPresent("#saveAgentChannelButton", "click", saveAgentChannel);
+  bindIfPresent("#testAgentChannelButton", "click", testAgentChannel);
+  bindIfPresent("#oauthAgentChannelButton", "click", oauthAgentChannel);
+  bindIfPresent("#refreshTasksButton", "click", loadAssistantTasks);
+  document.querySelectorAll("[data-agent-tab]").forEach((button) => button.addEventListener("click", () => setActiveAgentTab(button.dataset.agentTab)));
+  document.querySelectorAll("[data-task-filter]").forEach((button) => button.addEventListener("click", () => { state.taskFilter=button.dataset.taskFilter; document.querySelectorAll("[data-task-filter]").forEach((item)=>item.classList.toggle("active",item===button)); renderAssistantTasks(); }));
   bindIfPresent("#workflowForm", "submit", saveWorkflow);
   bindIfPresent("#deleteWorkflowButton", "click", deleteSelectedWorkflow);
   bindIfPresent("#createSkillDraftButton", "click", createSkillDraft);
   bindIfPresent("#testSkillButton", "click", testSkill);
+  bindIfPresent("#preflightSkillButton", "click", preflightSkill);
   bindIfPresent("#larkForm", "submit", saveLarkSettings);
   bindIfPresent("#larkAppForm", "submit", saveLarkAppSettings);
   bindIfPresent("#larkBotForm", "submit", saveLarkBot);
   bindIfPresent("#newLarkBotButton", "click", newLarkBot);
   bindIfPresent("#testLarkAppButton", "click", testLarkApp);
   bindIfPresent("#testLarkBotButton", "click", testLarkBot);
+  bindIfPresent("#startFeishuOauthButton", "click", startFeishuOauthForCurrentBot);
+  bindIfPresent("#copyFeishuOauthRedirectButton", "click", copyFeishuOauthRedirect);
   bindIfPresent("#testLarkButton", "click", testLark);
   bindIfPresent("#testProviderButton", "click", testProvider);
   bindIfPresent("#refreshAssistantHealthButton", "click", refreshAssistantHealth);
@@ -882,22 +1083,7 @@ function bindEvents() {
       notes: ""
     });
   });
-  $("#newAgentButton").addEventListener("click", () => {
-    state.selectedAgentId = null;
-    setForm($("#agentForm"), {
-      id: "",
-      name: "",
-      providerId: state.db.providers[0]?.id || "",
-      model: state.db.providers[0]?.defaultModel || "",
-      temperature: 0.3,
-      role: "",
-      style: "",
-      goals: "",
-      guardrails: "",
-      outputFormat: "",
-      skills: ""
-    });
-  });
+  $("#newAgentButton").addEventListener("click", () => { state.selectedAgentId=null; state.currentAgentTab="identity"; renderAgents(); renderAgentForm(); });
   $("#newWorkflowButton").addEventListener("click", () => {
     state.selectedWorkflowId = null;
     setForm($("#workflowForm"), {

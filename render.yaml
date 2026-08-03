@@ -19,6 +19,16 @@ services:
         value: admin@team.local
       - key: TONA_RESEARCH_STUDIO_URL
         value: https://tona-research-studio.fucx9501.chatgpt.site
+      - key: TONA_OAUTH_STATE_KEY
+        sync: false
+      - key: TONA_EXECUTOR_URL
+        sync: false
+      - key: TONA_EXECUTOR_TOKEN
+        sync: false
+      - key: TONA_PYTHON_RUNNER_URL
+        sync: false
+      - key: TONA_PYTHON_RUNNER_TOKEN
+        sync: false
       - key: REMINDER_TIMEZONE
         value: Asia/Shanghai
       - key: REMINDER_HOUR

@@ -6,13 +6,17 @@ const { execFile } = require("child_process");
 const { AsyncLocalStorage } = require("async_hooks");
 const {
   TOOL_CATALOG,
+  PLUGIN_CATALOG,
   normalizeRuntimeSettings,
   publicRuntimeSettings,
   executeTool,
-  executableToolCatalog
+  executableToolCatalog,
+  needsWebResearch
 } = require("./runtime/tool-runtime");
-const { WorkspaceFileStore, MAX_FILE_BYTES } = require("./runtime/workspace-files");
+const { WorkspaceFileStore, MAX_FILE_BYTES, MIME_BY_EXTENSION } = require("./runtime/workspace-files");
+const { HybridMemoryStore } = require("./runtime/memory-tools");
 const { prepareAgentToolResult } = require("./runtime/agent-tools");
+const { signOauthState, verifyOauthState, createAuthorizationUrl, exchangeAuthorizationCode, getFeishuUserInfo, publicAuthorization } = require("./runtime/feishu-oauth");
 const {
   needsCapabilityPlanning,
   fallbackCapabilityPlan,
@@ -35,6 +39,9 @@ const {
 } = require("./runtime/server-support");
 const { FEISHU_SYSTEM_SKILLS, selectApplicableSkills, skillContext } = require("./runtime/skill-runtime");
 const { rememberHumanMessage, fiveLayerMemoryContext } = require("./runtime/memory-runtime");
+const { normalizeAgentProfile, syncAgentProfiles, allowedToolIds, filterToolsForAgent, capabilityAllowed, filterCapabilityPlan, runtimeBudget } = require("./runtime/agent-profile");
+const { compileToolPolicy, normalizePolicy } = require("./runtime/policy-kernel");
+const { SubagentScheduler, a2aRequest, createBudgetPool, publicSubagentTask } = require("./runtime/subagent-runtime");
 
 const PORT = Number(process.env.PORT || 7357);
 const ROOT = __dirname;
@@ -46,6 +53,7 @@ const WORKSPACES_DIR = path.join(DATA_DIR, "workspaces");
 const workspaceContext = new AsyncLocalStorage();
 const collaborationPilotLocks = new Set();
 const paovrdLocks = new Set();
+const subagentScheduler = new SubagentScheduler();
 const HUB_AUTH_REQUIRED = process.env.TONA_HUB_AUTH_REQUIRED === "true";
 const TEAMFLOW_INTERNAL_PORT = Number(process.env.TEAMFLOW_INTERNAL_PORT || 7359);
 const LEGACY_OWNER_ID = process.env.TONA_LEGACY_OWNER_ID || "usr_owner";
@@ -335,7 +343,8 @@ function storagePaths() {
     runsDir: ROOT_RUNS_DIR,
     usagePath: path.join(DATA_DIR, "model-usage.jsonl"),
     toolUsagePath: path.join(DATA_DIR, "tool-usage.jsonl"),
-    filesDir: path.join(DATA_DIR, "files")
+    filesDir: path.join(DATA_DIR, "files"),
+    memoriesDir: path.join(DATA_DIR, "memories")
   };
   const directory = path.join(WORKSPACES_DIR, workspaceId);
   return {
@@ -343,12 +352,72 @@ function storagePaths() {
     runsDir: path.join(directory, "runs"),
     usagePath: path.join(directory, "model-usage.jsonl"),
     toolUsagePath: path.join(directory, "tool-usage.jsonl"),
-    filesDir: path.join(directory, "files")
+    filesDir: path.join(directory, "files"),
+    memoriesDir: path.join(directory, "memories")
   };
 }
 
 function workspaceFileStore() {
   return new WorkspaceFileStore(storagePaths().filesDir, activeWorkspaceId() || LEGACY_OWNER_ID);
+}
+function runtimeToolDefinition(toolId) {
+  const tool = TOOL_CATALOG.find((item) => item.id === toolId);
+  if (!tool) throw Object.assign(new Error("Unknown runtime tool: " + toolId), { code: "TOOL_NOT_FOUND", statusCode: 404 });
+  return tool;
+}
+
+function runtimePolicyDecision(db, agent, toolId, taskPolicy = {}) {
+  const tool = runtimeToolDefinition(toolId);
+  return compileToolPolicy({
+    tool,
+    platform: { network: "allow", externalWrites: "confirm", maxDurationMs: 120000, maxMemoryMb: 512, maxOutputBytes: 100 * 1024 * 1024, maxConcurrent: 4 },
+    workspace: { network: db.settings?.policy?.network || "allow", externalWrites: db.settings?.policy?.externalWrites || "confirm", ...(db.settings?.policy || {}) },
+    agent: agent || { allowedToolIds: [toolId] },
+    task: taskPolicy,
+    grantedScopes: taskPolicy.grantedScopes || []
+  });
+}
+
+function pythonInputArtifacts(store, ids = []) {
+  return [...new Set((Array.isArray(ids) ? ids : []).map(String))].slice(0, 10).map((artifactId) => {
+    const artifact = store.findArtifact(artifactId);
+    const value = store.readBuffer(artifact.file_id);
+    return { artifactId, name: artifact.name, mime: artifact.mime, bytesBase64: value.buffer.toString("base64"), sha256: artifact.checksum };
+  });
+}
+
+async function persistRuntimeArtifacts(store, artifacts = [], context = {}) {
+  return artifacts.slice(0, 20).map((artifact) => {
+    const buffer = Buffer.from(String(artifact.bytesBase64 || ""), "base64");
+    const extensionMime = MIME_BY_EXTENSION[path.extname(String(artifact.name || "")).toLowerCase()];
+    const requestedMime = artifact.mime && artifact.mime !== "application/octet-stream" ? artifact.mime : extensionMime || "";
+    const file = store.save({ name: artifact.name, mime: requestedMime, buffer, source: "python_runtime", sourceTaskId: context.taskId || "", createdBy: context.agentId || "python", artifact: true });
+    return { artifact_id: file.artifact_id, file_id: file.file_id, name: file.name, mime: file.mime, size: file.size, checksum: file.checksum };
+  });
+}
+function runtimeExecutionContext(db, toolId, options = {}) {
+  const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  const store = workspaceFileStore();
+  const input = options.input || {};
+  const policyDecision = runtimePolicyDecision(db, options.agent || null, toolId, options.taskPolicy || {});
+  return {
+    settings: db.settings?.runtime,
+    workspaceId,
+    authorizedWorkspaceId: workspaceId,
+    idempotencyKey: String(options.idempotencyKey || "").slice(0, 120),
+    allowedRisks: ["read", "write", "execute"],
+    confirmed: options.confirmed === true,
+    policyDecision,
+    fileStore: store,
+    memoryStore: toolId.startsWith("memory_") ? workspaceMemoryStore() : undefined,
+    inputArtifacts: toolId === "code.python.run" ? pythonInputArtifacts(store, input.inputArtifactIds) : [],
+    persistArtifacts: (artifacts) => persistRuntimeArtifacts(store, artifacts, { taskId: options.taskId, agentId: options.agent?.id }),
+    audit: (event) => writeToolEvent(storagePaths().toolUsagePath, { ...event, policyDecision: policyDecision.decision, reasonCode: policyDecision.reasonCode, ...(options.audit || {}) })
+  };
+}
+
+function workspaceMemoryStore() {
+  return new HybridMemoryStore(storagePaths().memoriesDir, activeWorkspaceId() || LEGACY_OWNER_ID);
 }
 
 function decodeFileContent(body) {
@@ -376,7 +445,7 @@ function ensureStore() {
 }
 
 // TONA_SECRETS_ENCRYPTION_V1: encrypt credentials at rest when the Render master key is configured.
-const SECRET_FIELDS = new Set(['apiKey', 'larkWebhookSecret', 'larkAppSecret', 'larkVerificationToken', 'larkEncryptKey', 'appSecret', 'verificationToken', 'encryptKey']);
+const SECRET_FIELDS = new Set(['apiKey', 'larkWebhookSecret', 'larkAppSecret', 'larkVerificationToken', 'larkEncryptKey', 'appSecret', 'verificationToken', 'encryptKey', 'accessToken', 'refreshToken']);
 function secretsKey() {
   const source = String(process.env.TONA_SECRETS_KEY || '');
   return source.length >= 24 ? crypto.createHash('sha256').update(source).digest() : null;
@@ -436,7 +505,8 @@ function readDb() {
   const deepSeekMigrated = migrateRetiredDeepSeekModels(db);
   const kimiMigrated = migrateRetiredKimiModels(db);
   const builtInSkillMigrated = syncBuiltInSkills(db);
-  if (deepSeekMigrated || kimiMigrated || builtInSkillMigrated) writeDb(db);
+  const agentProfilesMigrated = syncAgentProfiles(db, TOOL_CATALOG);
+  if (deepSeekMigrated || kimiMigrated || builtInSkillMigrated || agentProfilesMigrated) writeDb(db);
   return db;
 }
 function writeDb(db) {
@@ -449,7 +519,7 @@ function writeDb(db) {
 
 function publicDb(db) {
   const settings = db.settings || {};
-  const { collaborationTasks, groupKnowledge, memory, skillRequests, documentRequests, assistantTasks, runtime, ...safeSettings } = settings;
+  const { collaborationTasks, groupKnowledge, memory, skillRequests, documentRequests, assistantTasks, feishuUserAuthorizations, runtime, ...safeSettings } = settings;
   return {
     ...db,
     providers: db.providers.map((provider) => ({
@@ -459,6 +529,7 @@ function publicDb(db) {
     settings: {
       ...safeSettings,
       runtime: publicRuntimeSettings(runtime, maskSecret),
+      feishuOAuth: { connected: (feishuUserAuthorizations || []).some((item) => item.status === "active"), authorizations: (feishuUserAuthorizations || []).map(publicAuthorization) },
       collaborationPolicy: normalizeCollaborationPolicy(settings.collaborationPolicy, db.agents),
       larkWebhookSecret: settings.larkWebhookSecret ? maskSecret(settings.larkWebhookSecret) : "",
       larkAppSecret: settings.larkAppSecret ? maskSecret(settings.larkAppSecret) : "",
@@ -746,23 +817,59 @@ function upsertById(list, item) {
   return normalized;
 }
 
+function stringList(value) {
+  return Array.isArray(value) ? [...new Set(value.map((item) => String(item).trim()).filter(Boolean))] : [...new Set(String(value || "").split("\n").map((item) => item.trim()).filter(Boolean))];
+}
+
 function normalizeSkill(input) {
+  const status = ["draft", "tested", "published", "deprecated"].includes(input.status)
+    ? input.status
+    : input.builtIn ? "published" : input.enabled === false ? "draft" : "published";
   return {
     ...input,
-    triggerExamples: Array.isArray(input.triggerExamples)
-      ? input.triggerExamples.map((item) => String(item).trim()).filter(Boolean)
-      : String(input.triggerExamples || "").split("\n").map((item) => item.trim()).filter(Boolean),
-    enabled: coerceBoolean(input.enabled, true),
+    skillVersion: String(input.skillVersion || input.version || "1.0.0").slice(0, 30),
+    status,
+    triggerExamples: stringList(input.triggerExamples),
+    activationKeywords: stringList(input.activationKeywords),
+    whenToUse: stringList(input.whenToUse),
+    whenNotToUse: stringList(input.whenNotToUse),
+    requiredInputs: stringList(input.requiredInputs),
+    requiredCapabilities: stringList(input.requiredCapabilities),
+    optionalCapabilities: stringList(input.optionalCapabilities),
+    enabled: coerceBoolean(input.enabled, true) && status !== "deprecated",
     steps: Array.isArray(input.steps) ? input.steps : [],
-    inputGuide: String(input.inputGuide || '').trim(),
-    outputContract: String(input.outputContract || '').trim(),
-    qualityChecklist: Array.isArray(input.qualityChecklist) ? input.qualityChecklist.map((item) => String(item).trim()).filter(Boolean) : String(input.qualityChecklist || '').split('\n').map((item) => item.trim()).filter(Boolean),
+    inputGuide: String(input.inputGuide || "").trim(),
+    outputContract: String(input.outputContract || "").trim(),
+    qualityChecklist: stringList(input.qualityChecklist),
     templateVersion: Number(input.templateVersion || 0)
   };
 }
 
-function fallbackSkillDraft(db, request){const ids=new Set((db.agents||[]).map((a)=>a.id));const primary=ids.has('daily_assistant')?'daily_assistant':db.agents[0]?.id||'';const specialist=ids.has('research_assistant')?'research_assistant':primary;const name=String(request||'').trim().slice(0,32)||'\u65b0\u5efa Skill';return normalizeSkill({id:'',name,description:'\u7531 AI \u751f\u6210\u7684\u53ef\u7f16\u8f91 Skill \u8349\u6848\u3002',inputType:'text',enabled:true,triggerExamples:[name],steps:[{agentId:specialist,task:'Analyze the input and extract task-relevant information.'},{agentId:primary,task:'Produce an executable conclusion, next step, and open questions.'}]});}
-async function createSkillDraft(db,request){const fallback=fallbackSkillDraft(db,request);const provider=firstReadyProvider(db),agent=db.agents.find((a)=>a.id==='daily_assistant')||db.agents[0];if(!provider||!agent)return fallback;try{const result=await callOpenAICompatible(provider,agent,[{role:'system',content:'You design reusable TONA Skills. Return strict JSON only with name, description, inputType, triggerExamples, steps. inputType must be text. Use only agent IDs: '+(db.agents||[]).map((a)=>a.id).join(', ')+'. Steps contains 1-4 objects with agentId and task. Do not include external actions, secrets, or automatic writes.'},{role:'user',content:'Create a practical Skill draft for: '+String(request||'').slice(0,1000)}]);const match=String(result.content||'').match(/\{[\s\S]*\}/);if(!match)return fallback;const parsed=JSON.parse(match[0]);const allowed=new Set((db.agents||[]).map((a)=>a.id));const steps=(parsed.steps||[]).filter((x)=>allowed.has(x.agentId)&&String(x.task||'').trim()).slice(0,4);return normalizeSkill({...fallback,...parsed,id:'',name:String(parsed.name||fallback.name).slice(0,60),description:String(parsed.description||fallback.description).slice(0,300),triggerExamples:Array.isArray(parsed.triggerExamples)?parsed.triggerExamples.slice(0,5):fallback.triggerExamples,steps:steps.length?steps:fallback.steps,enabled:true});}catch{return fallback;}}
+function skillPreflight(input, db, agentId = "") {
+  const skill = normalizeSkill(input);
+  const errors = [];
+  const warnings = [];
+  if (!String(skill.name || "").trim()) errors.push("Skill name is required.");
+  if (!String(skill.description || "").trim()) errors.push("Skill description is required.");
+  if (!skill.triggerExamples.length && !skill.whenToUse.length && !skill.activationKeywords.length) warnings.push("Add at least one trigger example or when-to-use rule.");
+  if (!skill.steps.length) errors.push("At least one workflow step is required.");
+  if (!skill.outputContract) warnings.push("Output contract is not defined.");
+  if (!skill.qualityChecklist.length) warnings.push("Quality checklist is empty.");
+  const knownTools = new Map(TOOL_CATALOG.map((tool) => [tool.id, tool]));
+  for (const id of skill.requiredCapabilities) {
+    if (!knownTools.has(id)) errors.push("Unknown required capability: " + id);
+    else if (!["ready", "authorized"].includes(knownTools.get(id).status)) warnings.push("Capability is not ready: " + id);
+  }
+  const agent = agentId ? (db.agents || []).find((item) => item.id === agentId) : null;
+  if (agent) {
+    const granted = allowedToolIds(agent);
+    for (const id of skill.requiredCapabilities) if (!granted.has(id)) errors.push(agent.name + " has not been granted: " + id);
+  }
+  return { ok: errors.length === 0, errors, warnings, skill };
+}
+
+function fallbackSkillDraft(db, request){const ids=new Set((db.agents||[]).map((a)=>a.id));const primary=ids.has('daily_assistant')?'daily_assistant':db.agents[0]?.id||'';const specialist=ids.has('research_assistant')?'research_assistant':primary;const name=String(request||'').trim().slice(0,32)||'\u65b0\u5efa Skill';return normalizeSkill({id:'',name,description:'\u7531 AI \u751f\u6210\u7684\u53ef\u7f16\u8f91 Skill \u8349\u6848\u3002',inputType:'text',status:'draft',skillVersion:'0.1.0',enabled:true,triggerExamples:[name],steps:[{agentId:specialist,task:'Analyze the input and extract task-relevant information.'},{agentId:primary,task:'Produce an executable conclusion, next step, and open questions.'}]});}
+async function createSkillDraft(db,request){const fallback=fallbackSkillDraft(db,request);const provider=firstReadyProvider(db),agent=db.agents.find((a)=>a.id==='daily_assistant')||db.agents[0];if(!provider||!agent)return fallback;try{const result=await callOpenAICompatible(provider,agent,[{role:'system',content:'You design reusable TONA Skills. Return strict JSON only with name, description, inputType, triggerExamples, steps. inputType must be text. Use only agent IDs: '+(db.agents||[]).map((a)=>a.id).join(', ')+'. Steps contains 1-4 objects with agentId and task. Do not include external actions, secrets, or automatic writes.'},{role:'user',content:'Create a practical Skill draft for: '+String(request||'').slice(0,1000)}]);const match=String(result.content||'').match(/\{[\s\S]*\}/);if(!match)return fallback;const parsed=JSON.parse(match[0]);const allowed=new Set((db.agents||[]).map((a)=>a.id));const steps=(parsed.steps||[]).filter((x)=>allowed.has(x.agentId)&&String(x.task||'').trim()).slice(0,4);return normalizeSkill({...fallback,...parsed,id:'',name:String(parsed.name||fallback.name).slice(0,60),description:String(parsed.description||fallback.description).slice(0,300),triggerExamples:Array.isArray(parsed.triggerExamples)?parsed.triggerExamples.slice(0,5):fallback.triggerExamples,steps:steps.length?steps:fallback.steps,status:'draft',skillVersion:'0.1.0',enabled:true});}catch{return fallback;}}
 function deleteSkill(db, skillId) {
   const index = (db.workflows || []).findIndex((skill) => skill.id === skillId);
   if (index < 0) {
@@ -877,7 +984,7 @@ async function planFeishuCapabilities(db, bot, message) {
   const agent = db.agents.find((item) => item.id === bot.agentId) || db.agents.find((item) => item.id === "daily_assistant") || db.agents[0];
   const provider = db.providers.find((item) => item.id === agent?.providerId) || firstReadyProvider(db);
   const roster = (db.agents || []).map((item) => ({ ...item, hasFeishuBot: Boolean(larkBotForAgent(db, item.id)) }));
-  const fallback = fallbackCapabilityPlan({ text: message.text, agents: roster, currentAgentId: bot.agentId, now: Date.now() });
+  const fallback = filterCapabilityPlan(agent, fallbackCapabilityPlan({ text: message.text, agents: roster, currentAgentId: bot.agentId, now: Date.now() }));
   if (!needsCapabilityPlanning(message.text) || !agent || !provider || !provider.enabled || !provider.apiKey) return fallback;
   try {
     const planningAgent = { ...agent, name: agent.name + " Capability Planner", temperature: 0.1 };
@@ -893,7 +1000,7 @@ async function planFeishuCapabilities(db, bot, message) {
       if (merged.length >= 3) break;
     }
     writeToolEvent(storagePaths().toolUsagePath, { at: new Date().toISOString(), feature: "capability_planner", status: "planned", agentId: bot.agentId, actions: merged.map((action) => action.type) });
-    return { ...modelPlan, intent: merged.length ? "action" : "reply", actions: merged };
+    return filterCapabilityPlan(agent, { ...modelPlan, intent: merged.length ? "action" : "reply", actions: merged });
   } catch (error) {
     writeToolEvent(storagePaths().toolUsagePath, { at: new Date().toISOString(), feature: "capability_planner", status: "fallback", error: String(error?.message || error).slice(0, 500) });
     return fallback;
@@ -1248,6 +1355,97 @@ function publicFeishuCallbackUrl(req) {
   return proto + "://" + host + "/feishu/events/" + encodeURIComponent(workspaceId);
 }
 
+function publicRequestOrigin(req) {
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "";
+  const proto = String(req.headers["x-forwarded-proto"] || (process.env.NODE_ENV === "production" ? "https" : "http")).split(",")[0].trim();
+  return host ? proto + "://" + String(host).split(",")[0].trim() : "";
+}
+
+function oauthBot(db, botId = "") {
+  const bots = (db.settings?.larkBots || []).filter((item) => item.enabled !== false && item.appId && item.appSecret);
+  const selected = botId ? bots.find((item) => item.id === botId) : bots[0];
+  if (selected) return selected;
+  if (botId) throw Object.assign(new Error("The selected Feishu Agent bot is missing, disabled, or not fully configured."), { code: "FEISHU_BOT_NOT_READY", statusCode: 404 });
+  if (db.settings?.larkAppId && db.settings?.larkAppSecret) return { id: "legacy", appId: db.settings.larkAppId, appSecret: db.settings.larkAppSecret, enabled: true };
+  throw Object.assign(new Error("Configure an enabled Feishu app (App ID and App Secret) before starting personal authorization."), { code: "FEISHU_APP_REQUIRED", statusCode: 409 });
+}
+
+function oauthStateSecret(bot) {
+  const source = process.env.TONA_OAUTH_STATE_KEY || process.env.TONA_SECRETS_KEY || bot?.appSecret;
+  if (!source) throw Object.assign(new Error("Configure TONA_OAUTH_STATE_KEY or a Feishu App Secret before starting OAuth."), { code: "FEISHU_OAUTH_STATE_KEY_REQUIRED", statusCode: 503 });
+  return crypto.createHash("sha256").update("tona-feishu-oauth:" + source).digest("hex");
+}
+
+function oauthScopes(db, requested = []) {
+  const allowed = new Set(FEISHU_CAPABILITY_REQUESTS.flatMap((item) => item.kind === "user_oauth" ? item.scopes : []).filter((scope) => /^[a-z][a-z0-9_-]*:[a-z0-9_.:-]+$/i.test(scope)));
+  const values = (requested.length ? requested : ["calendar:calendar:readonly", "calendar:calendar"]).filter((scope) => allowed.has(scope));
+  return [...new Set([...values, "offline_access"])];
+}
+
+function activeFeishuAuthorizations(db) {
+  return (db.settings?.feishuUserAuthorizations || []).filter((item) => item.status === "active" && item.accessToken && ((!item.expiresAt || Date.parse(item.expiresAt) > Date.now()) || (item.refreshToken && (!item.refreshExpiresAt || Date.parse(item.refreshExpiresAt) > Date.now()))));
+}
+
+function runtimeToolCatalog(db) {
+  const authorizations = activeFeishuAuthorizations(db);
+  const calendarAuthorized = authorizations.some((item) => (item.scopes || []).some((scope) => scope === "calendar:calendar" || scope === "calendar:calendar:readonly"));
+  return TOOL_CATALOG.map((tool) => {
+    if (tool.id === "feishu_calendar_plan") return {
+      ...tool,
+      status: calendarAuthorized ? "authorized" : "authorization_required",
+      description: calendarAuthorized ? "Personal Feishu calendar authorization is connected; each actual calendar write still requires confirmation." : tool.description
+
+    };
+    if (tool.status === "permission_required") return { ...tool, action: { type: "feishu_admin", label: "Open Feishu console", url: "https://open.feishu.cn/app" } };
+    return tool;
+  });
+}
+
+async function handleFeishuOauthCallback(req, res, workspaceId) {
+  try {
+    const requestUrl = new URL(req.url, "http://localhost");
+    if (requestUrl.searchParams.get("error")) throw Object.assign(new Error(requestUrl.searchParams.get("error_description") || requestUrl.searchParams.get("error")), { statusCode: 400 });
+    const code = requestUrl.searchParams.get("code");
+    const stateValue = requestUrl.searchParams.get("state");
+    if (!code || !stateValue) throw Object.assign(new Error("Feishu OAuth callback is missing code or state."), { statusCode: 400 });
+    return workspaceContext.run(workspaceId === LEGACY_OWNER_ID ? {} : { workspaceId }, async () => {
+      const db = readDb();
+      const unsignedBody = String(stateValue).split(".")[0] || "";
+      let unverified = {};
+      try { unverified = JSON.parse(Buffer.from(unsignedBody.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")); } catch {}
+      const bot = oauthBot(db, unverified.botId || "");
+      const state = verifyOauthState(stateValue, oauthStateSecret(bot));
+      if (state.workspaceId !== workspaceId) throw Object.assign(new Error("Feishu OAuth workspace mismatch."), { code: "FEISHU_OAUTH_WORKSPACE_MISMATCH", statusCode: 403 });
+      const token = await exchangeAuthorizationCode({ appId: bot.appId, appSecret: bot.appSecret, code, redirectUri: state.redirectUri }, { apiBase: FEISHU_OPEN_API_BASE });
+      if (!token.access_token) throw Object.assign(new Error("Feishu did not return a user access token."), { code: "FEISHU_ACCESS_TOKEN_MISSING", statusCode: 502 });
+      const user = await getFeishuUserInfo(token.access_token, { apiBase: FEISHU_OPEN_API_BASE });
+      const now = new Date();
+      const scopes = Array.isArray(token.scope) ? token.scope : String(token.scope || state.scopes.join(" ")).split(/[ ,]+/).filter(Boolean);
+      const record = {
+        id: "foauth_" + crypto.randomUUID().slice(0, 12), botId: bot.id, appId: bot.appId,
+        userOpenId: user.open_id || state.userOpenId || "", unionId: user.union_id || "", name: user.name || user.en_name || "Feishu user",
+        scopes, accessToken: token.access_token, refreshToken: token.refresh_token || "",
+        expiresAt: new Date(now.getTime() + Math.max(60, Number(token.expires_in) || 7200) * 1000).toISOString(),
+        refreshExpiresAt: token.refresh_expires_in ? new Date(now.getTime() + Number(token.refresh_expires_in) * 1000).toISOString() : "",
+        status: "active", createdAt: now.toISOString(), updatedAt: now.toISOString()
+      };
+      db.settings ||= {};
+      const authorizations = Array.isArray(db.settings.feishuUserAuthorizations) ? db.settings.feishuUserAuthorizations : [];
+      const existing = authorizations.find((item) => item.botId === record.botId && item.userOpenId === record.userOpenId);
+      if (existing) Object.assign(existing, record, { id: existing.id, createdAt: existing.createdAt || record.createdAt }); else authorizations.push(record);
+      db.settings.feishuUserAuthorizations = authorizations.slice(-100);
+      const request = (db.settings.skillRequests || []).find((item) => item.id === state.requestId);
+      if (request) { request.status = "authorized"; request.authorizedBy = record.userOpenId; request.updatedAt = now.toISOString(); }
+      const task = (db.settings.assistantTasks || []).find((item) => item.id === state.requestId && item.type === "calendar");
+      if (task) { task.status = "oauth_authorized"; task.authorizedBy = record.userOpenId; task.updatedAt = now.toISOString(); }
+      writeDb(db);
+      return sendText(res, 200, '<!doctype html><meta charset="utf-8"><title>Feishu authorization complete</title><style>body{font:16px system-ui;max-width:640px;margin:10vh auto;padding:24px;color:#172033}a{color:#1769e0}</style><h1>Feishu authorization complete</h1><p>The personal account has been securely connected to this TONA workspace.</p><p>You can close this page or <a href="/">return to TONA Agent Studio</a>.</p>', "text/html; charset=utf-8");
+    });
+  } catch (error) {
+    logServerError(error);
+    return sendText(res, error.statusCode || 400, '<!doctype html><meta charset="utf-8"><title>Feishu authorization failed</title><h1>Authorization failed</h1><p>' + String(error.message || error).replace(/[&<>"']/g, "") + '</p><p><a href="/">Return to TONA Agent Studio</a></p>', "text/html; charset=utf-8");
+  }
+}
 function larkEventLogDir() {
   return path.join(path.dirname(storagePaths().dbPath), "lark_events");
 }
@@ -1320,21 +1518,23 @@ async function runAgentReply(db, agentId, text, options = {}) {
     try {
       deterministicResult = await prepareAgentToolResult({
         text, workspaceId, fileStore: workspaceFileStore, timeZone: db.settings?.timeZone || "UTC",
-        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, { ...event, feature: options.feature || "agent_reply" })
+        allowedToolIds: [...allowedToolIds(agent)],
+        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, { ...event, feature: options.feature || "agent_reply", agentId: agent.id })
       });
     } catch (error) {
       return `\u8fd9\u6b21\u5de5\u5177\u6267\u884c\u5931\u8d25\uff1a${String(error?.message || error).slice(0, 240)}\n\u8bf7\u68c0\u67e5\u8f93\u5165\u540e\u91cd\u8bd5\u3002`;
     }
   }
-  const runtimeResearch = options.enableTools ? await prepareRuntimeResearch({
+  const canSearch = allowedToolIds(agent).has("web_search");
+  const runtimeResearch = options.enableTools && canSearch ? await prepareRuntimeResearch({
     settings: db.settings?.runtime,
     text,
     usagePath: storagePaths().toolUsagePath,
     workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID,
     feature: options.feature || "agent_reply"
-  }) : null;
+  }) : options.enableTools && needsWebResearch(text) ? { requested: true, ok: false, error: "当前 Agent 未获授权使用联网搜索。" } : null;
   if (runtimeResearch?.requested && !runtimeResearch.ok) {
-    return "我收到了联网请求，但当前搜索工具还不能工作：" + runtimeResearch.error + "。请在 AI Studio 的“工具”页面配置搜索 API Key。";
+    return "我收到了联网请求，但当前搜索工具还不能工作：" + runtimeResearch.error + "。请在 AI Studio 的“神兵坊”配置搜索 API Key。";
   }
   const runtimeEvidence = [deterministicResult?.evidence, runtimeResearch?.ok ? runtimeResearch.evidence : ""].filter(Boolean).join("\n\n");
   const runtimeText = runtimeEvidence ? text + "\n\n" + runtimeEvidence : text;
@@ -1615,12 +1815,55 @@ function feishuChatText(text) {
     if (compact.at(-1) === line) continue;
     compact.push(line);
   }
-  const joined = compact.join("\n");
-  return joined.length > 4800 ? joined.slice(0, 4770) + "\n…（内容较长，可 @我要求展开）" : joined;
+  return compact.join("\n");
 }
+
+const FEISHU_POST_MAX_LINES = 20;
+const FEISHU_POST_MAX_CHARACTERS = 3500;
+const FEISHU_REPLY_PART_DELAY_MS = 250;
+
+function splitFeishuPostText(text) {
+  const sourceLines = feishuChatText(text).split("\n").filter(Boolean);
+  const lines = [];
+  for (const sourceLine of sourceLines) {
+    const characters = Array.from(sourceLine);
+    if (!characters.length) continue;
+    for (let offset = 0; offset < characters.length; offset += FEISHU_POST_MAX_CHARACTERS) {
+      lines.push(characters.slice(offset, offset + FEISHU_POST_MAX_CHARACTERS).join(""));
+    }
+  }
+
+  const chunks = [];
+  let current = [];
+  let currentCharacters = 0;
+  for (const line of lines) {
+    const lineCharacters = Array.from(line).length;
+    if (current.length && (current.length >= FEISHU_POST_MAX_LINES || currentCharacters + lineCharacters > FEISHU_POST_MAX_CHARACTERS)) {
+      chunks.push(current);
+      current = [];
+      currentCharacters = 0;
+    }
+    current.push(line);
+    currentCharacters += lineCharacters;
+  }
+  if (current.length) chunks.push(current);
+  return chunks.length ? chunks : [["已收到。"]];
+}
+
+function feishuPostContents(text, title = "") {
+  const chunks = splitFeishuPostText(text);
+  return chunks.map((lines, index) => {
+    const partTitle = chunks.length > 1
+      ? [String(title || "回复").slice(0, 64), `（${index + 1}/${chunks.length}）`].join("")
+      : String(title || "").slice(0, 80);
+    return { zh_cn: { title: partTitle, content: lines.map((line) => [{ tag: "text", text: line }]) } };
+  });
+}
+
 function feishuPostContent(text, title = "") {
-  const rows = feishuChatText(text).split("\n").filter(Boolean).slice(0, 24).map((line) => [{ tag: "text", text: line }]);
-  return { zh_cn: { title: String(title || "").slice(0, 80), content: rows.length ? rows : [[{ tag: "text", text: "已收到。" }]] } };
+  const content = feishuPostContents(text, title)[0];
+  content.zh_cn.title = String(title || "").slice(0, 80);
+  return content;
 }
 function groupMessageRequestsCollaboration(db, message, bot) {
   if (startsCollaborationTask(message.text)) return true;
@@ -1633,7 +1876,13 @@ function groupMessageRequestsCollaboration(db, message, bot) {
 
 
 async function replyFeishuMessage(settings, messageId, text) {
-  return replyFeishuMessagePayload(settings, messageId, "post", feishuPostContent(text));
+  const contents = feishuPostContents(text);
+  const responses = [];
+  for (let index = 0; index < contents.length; index += 1) {
+    if (index > 0) await new Promise((resolve) => setTimeout(resolve, FEISHU_REPLY_PART_DELAY_MS));
+    responses.push(await replyFeishuMessagePayload(settings, messageId, "post", contents[index]));
+  }
+  return responses.at(-1);
 }
 async function replyFeishuInteractiveCard(settings, messageId, card) {
   return replyFeishuMessagePayload(settings, messageId, "interactive", card);
@@ -1780,7 +2029,7 @@ function createAssistantTask(db, payload) {
 }
 function safeTimeZone(value) { try { new Intl.DateTimeFormat('zh-CN', { timeZone: value }).format(); return value; } catch { return 'UTC'; } }
 function scheduledReminderTask(db, message, bot, action) {
-  return createAssistantTask(db, { type: 'scheduled_reminder', title: String(action.reminderText || '飞书提醒').slice(0, 100), reminderText: String(action.reminderText || '你设置的提醒时间到了。').slice(0, 500), runAt: action.runAt, timeZone: safeTimeZone(db.settings?.timeZone || 'UTC'), requestedBy: message.senderId || '', chatId: message.chatId || '', messageId: message.messageId || '', botId: bot?.id || '', botAppId: bot?.appId || '', workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, attempts: 0 });
+  return createAssistantTask(db, { type: 'scheduled_reminder', agentId: bot?.agentId || "", title: String(action.reminderText || '飞书提醒').slice(0, 100), reminderText: String(action.reminderText || '你设置的提醒时间到了。').slice(0, 500), runAt: action.runAt, timeZone: safeTimeZone(db.settings?.timeZone || 'UTC'), requestedBy: message.senderId || '', chatId: message.chatId || '', messageId: message.messageId || '', botId: bot?.id || '', botAppId: bot?.appId || '', workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, attempts: 0 });
 }
 function scheduledReminderCard(task) {
   const displayTime = new Date(task.runAt).toLocaleString('zh-CN', { timeZone: task.timeZone, hour12: false });
@@ -1809,7 +2058,7 @@ function createFeishuPaovrdTask(db, message, bot) {
     limit: 3
   });
   const runtimeContext = [
-    fiveLayerMemoryContext(db, message, groupKnowledgeContext(db, message)),
+    fiveLayerMemoryContext(db, { ...message, agentId: agent?.id || "" }, groupKnowledgeContext(db, message), { agentId: agent?.id || "", policy: agent?.memoryPolicy }),
     skillContext(selectedSkills)
   ].filter(Boolean).join("\n\n");
   const task = createPaovrdTask({
@@ -1822,7 +2071,8 @@ function createFeishuPaovrdTask(db, message, bot) {
     messageId: message.messageId || "",
     requestedBy: message.senderId || "",
     botId: bot?.id || "",
-    botAppId: bot?.appId || ""
+    botAppId: bot?.appId || "",
+    budget: runtimeBudget(agent)
   });
   const tasks = assistantTaskEntries(db);
   tasks.push(task);
@@ -1857,28 +2107,99 @@ function paovrdConfirmationCard(task) {
     ]
   };
 }
-function paovrdDependencies(db, bot) {
+function paovrdDependencies(db, bot, options = {}) {
   const agent = db.agents.find((item) => item.id === bot?.agentId) || db.agents.find((item) => item.id === "daily_assistant") || db.agents[0];
   const provider = db.providers.find((item) => item.id === agent?.providerId) || firstReadyProvider(db);
-  if (!agent) throw new Error("PAOVRD 任务没有可用角色。");
-  if (!provider || !provider.enabled || !provider.apiKey) throw new Error("PAOVRD 任务没有可用模型，请先在模型页启用并绑定模型。");
-  const plannerAgent = { ...agent, name: `${agent.name} PAOVRD`, temperature: 0.1 };
+  if (!agent) throw new Error("PAOVRD task has no available Agent.");
+  if (!provider || !provider.enabled || !provider.apiKey) throw new Error("PAOVRD task has no ready model provider.");
+  const plannerAgent = { ...agent, name: agent.name + " PAOVRD", temperature: 0.1 };
   const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  const budgetPool = options.budgetPool || createBudgetPool({
+    maxDurationMs: agent.runtimePolicy?.maxDurationMs,
+    maxModelCalls: agent.runtimePolicy?.maxModelCalls,
+    maxToolCalls: agent.runtimePolicy?.maxToolCalls,
+    maxSubagents: agent.delegationPolicy?.maxTotalChildren,
+    maxConcurrentSubagents: agent.delegationPolicy?.maxConcurrentChildren
+  });
+  const callableAgents = options.disableDelegation || agent.delegationPolicy?.canDelegate === false ? [] : (db.agents || []).filter((candidate) =>
+    candidate.id !== agent.id
+    && (!agent.delegationPolicy?.callableAgentIds?.length || agent.delegationPolicy.callableAgentIds.includes(candidate.id))
+    && (!candidate.delegationPolicy?.callableByAgentIds?.length || candidate.delegationPolicy.callableByAgentIds.includes(agent.id))
+  );
   return {
-    tools: executableToolCatalog(),
+    tools: filterToolsForAgent(agent, executableToolCatalog()),
+    agents: callableAgents,
     callModel: ({ phase, prompt }) => callOpenAICompatible(provider, phase === "deliver" ? agent : plannerAgent, [
       { role: "system", content: phase === "deliver" ? agentSystemPrompt(agent) : "You are an internal PAOVRD controller. Follow the requested JSON contract exactly. Never expose hidden chain-of-thought." },
       { role: "user", content: prompt }
     ]),
-    executeTool: (toolId, input, execution) => executeTool(toolId, input, {
-      settings: db.settings?.runtime,
-      workspaceId,
-      authorizedWorkspaceId: workspaceId,
-      idempotencyKey: `paovrd:${execution.task.id}:${execution.task.metrics.steps + 1}:${toolId}`,
-      allowedRisks: execution.risk === "read" ? ["read"] : ["read", execution.risk],
-      fileStore: workspaceFileStore(),
-      audit: (event) => writeToolEvent(storagePaths().toolUsagePath, { ...event, feature: "paovrd", taskId: execution.task.id, agentId: agent.id })
-    }),
+    executeTool: (toolId, input, execution) => executeTool(toolId, input, runtimeExecutionContext(db, toolId, {
+      agent,
+      input,
+      taskId: execution.task.id,
+      confirmed: execution.risk !== "read",
+      idempotencyKey: "paovrd:" + execution.task.id + ":" + (execution.task.metrics.steps + 1) + ":" + toolId,
+      audit: { feature: "paovrd", taskId: execution.task.id, agentId: agent.id }
+    })),
+    delegate: callableAgents.length ? async (action, execution) => {
+      const child = callableAgents.find((item) => item.id === action.agentId);
+      const request = a2aRequest({
+        traceId: execution.task.traceId || execution.task.id,
+        fromAgentId: agent.id,
+        toAgentId: child.id,
+        intent: action.goal,
+        payload: action.payload,
+        outputSchema: action.outputSchema,
+        idempotencyKey: execution.task.id + ":" + execution.task.metrics.steps + ":" + child.id
+      });
+      const scheduled = await subagentScheduler.run(request, {
+        parentAgent: agent,
+        childAgent: child,
+        parentTaskId: execution.task.id,
+        workspaceId,
+        depth: Number(options.depth) || 0,
+        budgetPool,
+        taskToolIds: [...allowedToolIds(agent)],
+        onTask: (snapshot) => {
+          const tasks = assistantTaskEntries(db);
+          const saved = { ...snapshot, type: "subagent", title: child.name + " · " + action.goal.slice(0, 80) };
+          const index = tasks.findIndex((item) => item.id === snapshot.id);
+          if (index >= 0) tasks[index] = saved; else tasks.push(saved);
+          db.settings.assistantTasks = tasks.slice(-300);
+          writeDb(db);
+        },
+        runChild: async ({ task: subtask, effectiveToolIds, budgetPool: shared }) => {
+          const childBudget = runtimeBudget(child);
+          const childTask = createPaovrdTask({
+            id: subtask.id + "_runtime",
+            goal: action.goal,
+            context: "Parent payload: " + compactText(action.payload, 3000),
+            agentId: child.id,
+            workspaceId,
+            budget: {
+              ...childBudget,
+              maxSteps: Math.min(childBudget.maxSteps, 6),
+              maxToolCalls: Math.min(childBudget.maxToolCalls, Math.max(1, shared.maxToolCalls - shared.usedToolCalls)),
+              maxModelCalls: Math.min(childBudget.maxModelCalls, Math.max(2, shared.maxModelCalls - shared.usedModelCalls)),
+              maxSubagents: 1
+            }
+          });
+          const childDeps = paovrdDependencies(db, { agentId: child.id }, { depth: (Number(options.depth) || 0) + 1, budgetPool: shared });
+          childDeps.tools = childDeps.tools.filter((tool) => effectiveToolIds.includes(tool.id) && tool.manifest?.policy?.sideEffectScope !== "external");
+          const outcome = await runPaovrd(childTask, childDeps);
+          shared.usedModelCalls += childTask.metrics.modelCalls;
+          shared.usedToolCalls += childTask.metrics.toolCalls;
+          const artifacts = childTask.observations.flatMap((item) => item.artifactIds || []);
+          return {
+            status: outcome.status === "completed" ? "completed" : outcome.status === "failed" ? "failed" : "partial",
+            output: { summary: outcome.message || childTask.finalAnswer || childTask.error || "" },
+            artifacts,
+            metrics: childTask.metrics
+          };
+        }
+      });
+      return publicSubagentTask(scheduled);
+    } : undefined,
     persist: () => writeDb(db)
   };
 }
@@ -1958,6 +2279,11 @@ function schedulePaovrdResume(workspaceId, taskId) {
       task.status = "failed"; task.error = String(error?.message || error).slice(0, 1000); task.updatedAt = new Date().toISOString(); writeDb(db); logServerError(error);
     }
   }));
+}
+function publicAssistantTask(task) {
+  if (task.type === "paovrd") return publicPaovrdTask(task);
+  if (task.type === "subagent") return publicSubagentTask(task);
+  return { id: task.id, type: task.type, title: task.title || task.reminderText || "任务", status: task.status, agentId: task.agentId || "", botId: task.botId || "", runAt: task.runAt || "", timeZone: task.timeZone || "", attempts: Number(task.attempts || 0), error: task.error || task.lastError || "", createdAt: task.createdAt, updatedAt: task.updatedAt };
 }
 function publicPaovrdTask(task) {
   return {
@@ -2281,12 +2607,15 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
   const message = extractFeishuMessage(eventBody);
   if (!bot || !message.messageId || !message.text) return;
   if (!(message.eventType.includes("im.message") || message.eventType.includes("message"))) return;
+  const agent = db.agents.find((item) => item.id === bot.agentId) || db.agents.find((item) => item.id === "daily_assistant") || db.agents[0];
+  if (!agent) return;
+  message.agentId = agent.id;
 
   const policy = normalizeCollaborationPolicy(db.settings?.collaborationPolicy, db.agents);
   const isHumanSender = !message.senderType || message.senderType === "user";
   if (isHumanSender) {
     rememberGroupKnowledge(db, message);
-    if (rememberHumanMessage(db, message)) writeDb(db);
+    if (rememberHumanMessage(db, { ...message, agentId: agent.id })) writeDb(db);
   }
   let task = null;
   let conversation = null;
@@ -2330,7 +2659,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       return;
     }
     const documentAction = capabilityPlan.actions.find((item) => item.type === 'feishu_document_create');
-    if (documentAction || wantsFeishuDocumentDelivery(message.text)) {
+    if (documentAction || (capabilityAllowed(agent, { type: "feishu_document_create" }) && wantsFeishuDocumentDelivery(message.text))) {
       const plannedMessage = documentAction?.task ? { ...message, text: documentAction.task } : message;
       const request = createDocumentDeliveryRequest(db, plannedMessage, bot);
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, documentDeliveryCard(request));
@@ -2346,16 +2675,16 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       }
     }
     const calendarAction = capabilityPlan.actions.find((item) => item.type === 'feishu_calendar_plan');
-    if (calendarAction || wantsCalendarAction(message.text)) {
+    if (calendarAction || (capabilityAllowed(agent, { type: "feishu_calendar_plan" }) && wantsCalendarAction(message.text))) {
       const calendar=calendarTaskFromText(message.text);
-      const task=createAssistantTask(db,{type:'calendar',title:calendar.title,sourceText:calendar.source,requestedBy:message.senderId||'',chatId:message.chatId||'',messageId:message.messageId||'',botId:bot?.id||'',botAppId:bot?.appId||'',workspaceId:activeWorkspaceId()||LEGACY_OWNER_ID});
+      const task=createAssistantTask(db,{type:'calendar',agentId:agent.id,title:calendar.title,sourceText:calendar.source,requestedBy:message.senderId||'',chatId:message.chatId||'',messageId:message.messageId||'',botId:bot?.id||'',botAppId:bot?.appId||'',workspaceId:activeWorkspaceId()||LEGACY_OWNER_ID});
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot),message.messageId,calendarTaskCard(task));
       return;
     }
     const decisionMakerAllowed = !policy.decisionMakerOpenIds.length || policy.decisionMakerOpenIds.includes(message.senderId);
     const collaborationAction = capabilityPlan?.actions.find((item) => item.type === 'multi_agent_collaboration');
     plannedCollaborationPlan = collaborationAction ? collaborationPlanFromCapabilityAction(db, bot, collaborationAction) : null;
-    const explicitCollaborationPlan = message.chatType === "group" && groupMessageRequestsCollaboration(db, message, bot) ? collaborationPlanFromMessage(db, message, bot) : null;
+    const explicitCollaborationPlan = message.chatType === "group" && capabilityAllowed(agent, { type: "multi_agent_collaboration" }) && groupMessageRequestsCollaboration(db, message, bot) ? collaborationPlanFromMessage(db, message, bot) : null;
     const plan = message.chatType === "group" ? (explicitCollaborationPlan || plannedCollaborationPlan) : null;
     const canStart = message.chatType === "group" && policy.enabled && decisionMakerAllowed && Boolean(plan) && !collaborationTaskAlreadyStarted(db, message.messageId);
     if (canStart) {
@@ -2364,7 +2693,15 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       await runServerManagedCollaboration(db, task, message, bot);
       return;
     }
-    if (!wantsFeishuDocumentRead(message.text) && shouldUsePaovrd(message.text, capabilityPlan)) {
+    if (wantsFeishuDocumentRead(message.text) && !capabilityAllowed(agent, { type: "feishu_document_read" })) {
+      await replyFeishuMessage(larkBotToAppSettings(bot), message.messageId, "当前 Agent 未获授权读取飞书文档。请在 TONA 的 Agent 能力页启用该能力后重试。");
+      return;
+    }
+    if (needsWebResearch(message.text) && !capabilityAllowed(agent, { type: "web_search" })) {
+      await replyFeishuMessage(larkBotToAppSettings(bot), message.messageId, "当前 Agent 未获授权使用联网搜索。请在 TONA 的 Agent 能力页启用该工具后重试。");
+      return;
+    }
+    if (!wantsFeishuDocumentRead(message.text) && filterToolsForAgent(agent, executableToolCatalog()).length && shouldUsePaovrd(message.text, capabilityPlan)) {
       const paovrdTask = createFeishuPaovrdTask(db, message, bot);
       const outcome = await executePaovrdAssistantTask(db, paovrdTask, bot);
       await deliverPaovrdOutcome(db, bot, paovrdTask, outcome, message.messageId);
@@ -2384,9 +2721,9 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
 
   let replyText = "";
   try {
-    const groupContext = fiveLayerMemoryContext(db, message, groupKnowledgeContext(db, message));
+    const groupContext = fiveLayerMemoryContext(db, { ...message, agentId: agent.id }, groupKnowledgeContext(db, message), { agentId: agent.id, policy: agent.memoryPolicy });
     let promptText = message.text;
-    if (!task && wantsFeishuDocumentRead(message.text)) {
+    if (!task && capabilityAllowed(agent, { type: "feishu_document_read" }) && wantsFeishuDocumentRead(message.text)) {
       const documentId = extractFeishuDocumentId(message.text);
       const documentText = await readFeishuDocument(larkBotToAppSettings(bot), documentId);
       promptText = "User explicitly asked to read this Feishu document. Answer in Chinese and cite uncertainty if the document is incomplete.\n\nDocument content:\n" + documentText + "\n\nUser request:\n" + message.text;
@@ -2621,15 +2958,64 @@ async function handleApiInWorkspace(req, res, pathname) {
       return sendJson(res, 200, modelUsageSummary());
     }
     if (req.method === "GET" && pathname === "/api/assistant-tasks") {
-      const tasks = paovrdTaskEntries(readDb()).slice(-30).reverse().map(publicPaovrdTask);
+      const tasks = assistantTaskEntries(readDb()).slice(-100).reverse().map(publicAssistantTask);
       return sendJson(res, 200, { tasks });
+    }
+    const assistantTaskActionMatch = pathname.match(/^\/api\/assistant-tasks\/([A-Za-z0-9_-]{1,80})\/action$/);
+    if (req.method === "POST" && assistantTaskActionMatch) {
+      const body = await readBody(req); const db = readDb(); const task = assistantTaskEntries(db).find((item) => item.id === assistantTaskActionMatch[1]);
+      if (!task) return sendJson(res, 404, { error: "Task not found." });
+      const action = String(body.action || ""); const terminal = ["completed", "completed_with_limits", "sent", "failed", "cancelled", "rejected", "resume_failed"].includes(task.status);
+      if (action === "cancel" && !terminal) { task.status = "cancelled"; task.pendingAction = null; for (const child of assistantTaskEntries(db).filter((item) => item.parentTaskId === task.id && !["completed","failed","cancelled","timed_out","refused"].includes(item.status))) { child.status = "cancelled"; child.updatedAt = new Date().toISOString(); } }
+      else if (action === "pause" && task.type === "scheduled_reminder" && task.status === "scheduled") task.status = "paused";
+      else if (action === "resume" && task.type === "scheduled_reminder" && task.status === "paused") task.status = "scheduled";
+      else return sendJson(res, 409, { error: "This task action is not valid for the current state." });
+      task.updatedAt = new Date().toISOString(); writeDb(db); return sendJson(res, 200, { task: publicAssistantTask(task) });
+    }
+    if (req.method === "GET" && pathname === "/api/feishu/oauth/config") {
+      const db = readDb();
+      const requestUrl = new URL(req.url, "http://localhost");
+      const bot = oauthBot(db, String(requestUrl.searchParams.get("botId") || ""));
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const origin = publicRequestOrigin(req);
+      const authorizations = activeFeishuAuthorizations(db).filter((item) => item.botId === bot.id).map(publicAuthorization);
+      return sendJson(res, 200, {
+        botId: bot.id,
+        redirectUri: origin + "/feishu/oauth/callback/" + encodeURIComponent(workspaceId),
+        connected: authorizations.length > 0,
+        authorizations
+      });
+    }
+    if (req.method === "GET" && pathname === "/api/feishu/oauth/status") {
+      const db = readDb();
+      return sendJson(res, 200, { connected: activeFeishuAuthorizations(db).length > 0, authorizations: activeFeishuAuthorizations(db).map(publicAuthorization) });
+    }
+    if (req.method === "POST" && pathname === "/api/feishu/oauth/start") {
+      const body = await readBody(req);
+      const db = readDb();
+      const bot = oauthBot(db, String(body.botId || ""));
+      if (!secretsKey()) throw Object.assign(new Error("Configure TONA_SECRETS_KEY (at least 24 characters) before storing Feishu user tokens."), { statusCode: 503, code: "TONA_SECRETS_KEY_REQUIRED" });
+      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+      const origin = publicRequestOrigin(req);
+      if (!origin) throw Object.assign(new Error("Cannot determine the public TONA origin for OAuth callback."), { statusCode: 400, code: "FEISHU_OAUTH_ORIGIN_MISSING" });
+      const requestId = String(body.requestId || "").slice(0, 100);
+      const request = [...(db.settings?.skillRequests || []), ...(db.settings?.assistantTasks || [])].find((item) => item.id === requestId);
+      const requestedScopes = request?.scopes || (Array.isArray(body.scopes) ? body.scopes : []);
+      const scopes = oauthScopes(db, requestedScopes);
+      const redirectUri = origin + "/feishu/oauth/callback/" + encodeURIComponent(workspaceId);
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+      const state = signOauthState({ workspaceId, botId: bot.id, requestId, userOpenId: String(body.userOpenId || "").slice(0, 100), scopes, redirectUri, exp: expiresAt, nonce: crypto.randomUUID() }, oauthStateSecret(bot));
+      return sendJson(res, 200, { authorizationUrl: createAuthorizationUrl({ appId: bot.appId, redirectUri, scopes, state }), redirectUri, expiresAt: new Date(expiresAt).toISOString(), scopes, botId: bot.id });
+
     }
     if (req.method === "GET" && pathname === "/api/runtime") {
       const db = readDb();
       const settings = publicRuntimeSettings(db.settings?.runtime, maskSecret);
       return sendJson(res, 200, {
         settings,
-        tools: TOOL_CATALOG,
+        policy: normalizePolicy(db.settings?.policy || { network: "allow", externalWrites: "confirm" }),
+        plugins: PLUGIN_CATALOG,
+        tools: runtimeToolCatalog(db),
         usage: runtimeUsageSummary(db.settings?.runtime, storagePaths().toolUsagePath)
       });
     }
@@ -2648,9 +3034,11 @@ async function handleApiInWorkspace(req, res, pathname) {
         },
         webReader: { ...existing.webReader, ...(body.webReader || {}) }
       });
+      db.settings.policy = normalizePolicy({ ...(db.settings?.policy || {}), ...(body.policy || {}) });
       writeDb(db);
       return sendJson(res, 200, {
         settings: publicRuntimeSettings(db.settings.runtime, maskSecret),
+        policy: db.settings.policy,
         usage: runtimeUsageSummary(db.settings.runtime, storagePaths().toolUsagePath)
       });
     }
@@ -2659,13 +3047,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       const db = readDb();
       const query = String(body.query || "").trim();
       if (!query) throw new Error("Search test query is required.");
-      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
-      const execution = await executeTool("web_search", { query }, {
-        settings: db.settings?.runtime,
-        workspaceId,
-        authorizedWorkspaceId: workspaceId,
-        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
-      });
+      const execution = await executeTool("web_search", { query }, runtimeExecutionContext(db, "web_search", { input: { query } }));
       return sendJson(res, 200, {
         ok: true,
         invocationId: execution.invocationId,
@@ -2673,18 +3055,17 @@ async function handleApiInWorkspace(req, res, pathname) {
         sources: execution.data.sources.slice(0, 5)
       });
     }
-    const runtimeToolMatch = pathname.match(/^\/api\/runtime\/tools\/([A-Za-z0-9_-]{1,80})\/run$/);
+    const runtimeToolMatch = pathname.match(/^\/api\/runtime\/tools\/([A-Za-z0-9_.-]{1,80})\/run$/);
     if (req.method === "POST" && runtimeToolMatch) {
       const body = await readBody(req, MAX_FILE_BYTES * 2);
       const db = readDb();
-      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
-      const execution = await executeTool(runtimeToolMatch[1], body.input || {}, {
-        settings: db.settings?.runtime, workspaceId, authorizedWorkspaceId: workspaceId,
-        idempotencyKey: String(req.headers["idempotency-key"] || body.idempotencyKey || "").slice(0, 120),
-        allowedRisks: body.confirmed === true ? ["read", "write"] : ["read"],
-        fileStore: ["file_read", "artifact_generate"].includes(runtimeToolMatch[1]) ? workspaceFileStore() : undefined,
-        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
-      });
+      const toolId = runtimeToolMatch[1];
+      const input = body.input || {};
+      const agent = body.agentId ? db.agents.find((item) => item.id === body.agentId) : null;
+      const execution = await executeTool(toolId, input, runtimeExecutionContext(db, toolId, {
+        agent, input, confirmed: body.confirmed === true,
+        idempotencyKey: req.headers["idempotency-key"] || body.idempotencyKey
+      }));
       return sendJson(res, 200, execution);
     }
     if (req.method === "GET" && pathname === "/api/files") {
@@ -2698,21 +3079,24 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     if (req.method === "POST" && pathname === "/api/files/generate") {
       const body = await readBody(req, MAX_FILE_BYTES * 2);
-      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
-      const execution = await executeTool("artifact_generate", body, {
-        workspaceId, authorizedWorkspaceId: workspaceId, allowedRisks: ["read", "write"], fileStore: workspaceFileStore(),
-        idempotencyKey: String(req.headers["idempotency-key"] || "").slice(0, 120),
-        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
-      });
+      const db = readDb();
+      const execution = await executeTool("artifact_generate", body, runtimeExecutionContext(db, "artifact_generate", {
+        input: body, confirmed: true, idempotencyKey: req.headers["idempotency-key"]
+      }));
       return sendJson(res, 201, execution);
     }
     const fileReadMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/read$/);
     if (req.method === "GET" && fileReadMatch) {
-      const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
-      const execution = await executeTool("file_read", { file_id: fileReadMatch[1] }, {
-        workspaceId, authorizedWorkspaceId: workspaceId, fileStore: workspaceFileStore(),
-        audit: (event) => writeToolEvent(storagePaths().toolUsagePath, event)
-      });
+      const db = readDb();
+      const input = { file_id: fileReadMatch[1] };
+      const execution = await executeTool("file_read", input, runtimeExecutionContext(db, "file_read", { input }));
+      return sendJson(res, 200, execution);
+    }
+    const fileParseMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/parse$/);
+    if (req.method === "POST" && fileParseMatch) {
+      const db = readDb();
+      const input = { file_id: fileParseMatch[1] };
+      const execution = await executeTool("pdf_parse", input, runtimeExecutionContext(db, "pdf_parse", { input }));
       return sendJson(res, 200, execution);
     }
     const fileContentMatch = pathname.match(/^\/api\/files\/(file_[A-Za-z0-9_-]{12,80})\/content$/);
@@ -2778,6 +3162,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       const body = await readBody(req);
       const db = readDb();
       const agent = upsertById(db.agents, body);
+      Object.assign(agent, normalizeAgentProfile(agent, { workflows: db.workflows || [], toolCatalog: TOOL_CATALOG, bots: db.settings?.larkBots || [] }));
       migrateRetiredDeepSeekModels(db);
       migrateRetiredKimiModels(db);
       writeDb(db);
@@ -2794,10 +3179,23 @@ async function handleApiInWorkspace(req, res, pathname) {
       return sendJson(res, 200, { skills: (readDb().workflows || []).map(normalizeSkill) });
     }
     if (req.method === 'POST' && pathname === '/api/skills/draft') { const body=await readBody(req); const request=String(body.request||'').trim(); if(!request)throw new Error('Describe the skill you want to create.'); return sendJson(res,200,{skill:await createSkillDraft(readDb(),request)}); }
-    if (req.method === 'POST' && pathname === '/api/skills/test') { const body=await readBody(req); const skillId=String(body.skillId||'').trim(),input=String(body.input||'').trim(); if(!skillId||!input)throw new Error('Skill and test input are required.'); const run=await runWorkflow({skillId,input}); return sendJson(res,200,{...run,testOnly:true}); }
+        if (req.method === "POST" && pathname === "/api/skills/test") {
+      const body = await readBody(req); const skillId = String(body.skillId || "").trim(), input = String(body.input || "").trim();
+      if (!skillId || !input) throw new Error("Skill and test input are required.");
+      const run = await runWorkflow({ skillId, input });
+      const db = readDb(); const skill = db.workflows.find((item) => item.id === skillId);
+      if (skill && skill.status !== "published") { skill.status = "tested"; skill.lastTestedAt = new Date().toISOString(); writeDb(db); }
+      return sendJson(res, 200, { ...run, testOnly: true, skillStatus: skill?.status || "" });
+    }
+    if (req.method === "POST" && pathname === "/api/skills/preflight") {
+      const body = await readBody(req); const db = readDb();
+      return sendJson(res, 200, skillPreflight(body.skill || body, db, String(body.agentId || "")));
+    }
     if (req.method === "POST" && pathname === "/api/skills") {
       const body = normalizeSkill(await readBody(req));
       const db = readDb();
+      const preflight = skillPreflight(body, db);
+      if (body.status === "published" && !preflight.ok) return sendJson(res, 409, { error: "Skill preflight failed.", preflight });
       const skill = upsertById(db.workflows, body);
       writeDb(db);
       return sendJson(res, 200, { skill });
@@ -2844,6 +3242,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       if (!bot.agentId) throw new Error("Agent is required.");
       if (existing) Object.assign(existing, bot);
       else db.settings.larkBots.push(bot);
+      syncAgentProfiles(db, TOOL_CATALOG);
       writeDb(db);
       return sendJson(res, 200, { bot: publicDb(db).settings.larkBots.find((item) => item.id === bot.id), settings: publicDb(db).settings });
     }
@@ -2940,6 +3339,8 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && (url.pathname === "/gateway/health" || url.pathname === "/api/health")) {
     return sendJson(res, 200, { ok: true, service: "tona-agent-studio" });
   }
+  const oauthCallback = url.pathname.match(/^\/feishu\/oauth\/callback\/([A-Za-z0-9_-]{3,80})$/);
+  if (req.method === "GET" && oauthCallback) return handleFeishuOauthCallback(req, res, oauthCallback[1]);
   const scopedEvent = url.pathname.match(/^\/feishu\/events\/([A-Za-z0-9_-]{3,80})$/);
   if (scopedEvent) {
     return workspaceContext.run({ workspaceId: scopedEvent[1] }, () => handleFeishuEvent(req, res));

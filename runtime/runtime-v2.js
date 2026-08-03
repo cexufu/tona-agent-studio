@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { assertPolicyDecision } = require("./policy-kernel");
 
 const PROTOCOL_VERSION = "2.0";
 const RISK_LEVELS = ["read", "write", "execute"];
@@ -115,6 +116,7 @@ function createToolRegistry(definitions) {
     if (!definition?.id || registry.has(definition.id)) throw new Error(`Invalid or duplicate Runtime tool: ${definition?.id || "unknown"}`);
     if (!RISK_LEVELS.includes(definition.risk)) throw new Error(`Invalid risk level for Runtime tool ${definition.id}.`);
     if (!definition.inputSchema || !definition.outputSchema || typeof definition.handler !== "function") throw new Error(`Runtime tool ${definition.id} is missing its schema or handler.`);
+    if (definition.qualityGates !== undefined && (!Array.isArray(definition.qualityGates) || definition.qualityGates.some((gate) => typeof gate !== "function"))) throw new Error(`Runtime tool ${definition.id} has invalid quality gates.`);
     definition.policy = { timeoutMs: 10000, retries: 0, idempotent: true, ...definition.policy, rateLimit: { maxCalls: 120, windowMs: 60000, ...(definition.policy?.rateLimit || {}) } };
     registry.set(definition.id, definition);
   }
@@ -123,6 +125,7 @@ function createToolRegistry(definitions) {
 
 async function executeRegisteredTool(registry, toolId, input, context = {}) {
   const definition = registry.get(toolId);
+  if (context.policyDecision) assertPolicyDecision(context.policyDecision, { confirmed: context.confirmed === true });
   if (!definition || definition.status !== "ready") throw new RuntimeToolError("TOOL_NOT_FOUND", `Unknown or unavailable Runtime tool: ${toolId}`, { category: "not_found", status: 404 });
   const workspaceId = assertWorkspacePermission(definition, context);
   assertSchema(definition.inputSchema, input, "Input");
@@ -130,19 +133,21 @@ async function executeRegisteredTool(registry, toolId, input, context = {}) {
   const idempotencyTtlMs = context.idempotencyTtlMs || 10 * 60 * 1000;
   pruneRuntimeCaches(now, idempotencyTtlMs);
   const invocationId = `inv_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const traceId = /^[A-Za-z0-9_-]{8,120}$/.test(String(context.traceId || "")) ? String(context.traceId) : `trc_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const parentInvocationId = /^[A-Za-z0-9_-]{8,120}$/.test(String(context.parentInvocationId || "")) ? String(context.parentInvocationId) : "";
   const startedAt = new Date(now).toISOString();
   const cacheKey = context.idempotencyKey && definition.policy.idempotent ? `${workspaceId}:${toolId}:${context.idempotencyKey}` : "";
   if (cacheKey && idempotencyCache.has(cacheKey)) {
     const cached = idempotencyCache.get(cacheKey);
     if (now - cached.at <= idempotencyTtlMs) {
-      const envelope = { ...cached.envelope, invocationId, meta: { ...cached.envelope.meta, cached: true, idempotencyKey: context.idempotencyKey } };
-      context.audit?.({ at: new Date(now).toISOString(), invocationId, workspaceId, toolId, risk: definition.risk, status: "cache_hit", durationMs: 0, attempts: 0, artifactIds: envelope.artifactIds });
+      const envelope = { ...cached.envelope, invocationId, traceId, parentInvocationId, meta: { ...cached.envelope.meta, cached: true, idempotencyKey: context.idempotencyKey } };
+      context.audit?.({ at: new Date(now).toISOString(), invocationId, traceId, parentInvocationId, workspaceId, toolId, pluginId: definition.plugin?.id || "", risk: definition.risk, status: "cache_hit", durationMs: 0, attempts: 0, artifactIds: envelope.artifactIds });
       return envelope;
     }
     idempotencyCache.delete(cacheKey);
   }
   consumeRateLimit(definition, workspaceId, now);
-  context.audit?.({ at: startedAt, invocationId, workspaceId, toolId, risk: definition.risk, status: "started" });
+  context.audit?.({ at: startedAt, invocationId, traceId, parentInvocationId, workspaceId, toolId, pluginId: definition.plugin?.id || "", risk: definition.risk, status: "started" });
   let attempts = 0;
   let lastError;
   while (attempts <= definition.policy.retries) {
@@ -156,12 +161,18 @@ async function executeRegisteredTool(registry, toolId, input, context = {}) {
       const data = await Promise.race([Promise.resolve(definition.handler(input, context)), timeout]);
       clearTimeout(timer);
       assertSchema(definition.outputSchema, data, "Output");
+      const quality = [];
+      for (const gate of definition.qualityGates || []) {
+        const check = await gate({ input, data, context, definition });
+        if (!check || check.ok !== true) throw new RuntimeToolError("TOOL_QUALITY_GATE_FAILED", String(check?.message || "Tool output failed a quality gate."), { category: "quality", status: 422, details: check?.details });
+        quality.push({ id: String(check.id || gate.name || "quality_gate"), ok: true });
+      }
       const artifacts = Array.isArray(data?.artifacts) ? data.artifacts : [];
       for (const artifact of artifacts) if (!ARTIFACT_ID_PATTERN.test(String(artifact?.artifact_id || ""))) throw new RuntimeToolError("TOOL_ARTIFACT_INVALID", "Tool returned an invalid artifact_id.", { category: "artifact", status: 500 });
       const completed = Number(context.now?.() ?? Date.now());
-      const envelope = { protocolVersion: PROTOCOL_VERSION, invocationId, toolId, workspaceId, risk: definition.risk, status: "success", resultType: "tool_result", data, artifactIds: artifacts.map((artifact) => artifact.artifact_id), meta: { startedAt, completedAt: new Date(completed).toISOString(), durationMs: Math.max(0, completed - now), attempts, cached: false, idempotencyKey: context.idempotencyKey || "" } };
+      const envelope = { protocolVersion: PROTOCOL_VERSION, invocationId, traceId, parentInvocationId, toolId, pluginId: definition.plugin?.id || "", workspaceId, risk: definition.risk, status: "success", resultType: "tool_result", data, artifactIds: artifacts.map((artifact) => artifact.artifact_id), quality, meta: { startedAt, completedAt: new Date(completed).toISOString(), durationMs: Math.max(0, completed - now), attempts, cached: false, idempotencyKey: context.idempotencyKey || "" } };
       if (cacheKey) idempotencyCache.set(cacheKey, { at: now, envelope });
-      context.audit?.({ at: envelope.meta.completedAt, invocationId, workspaceId, toolId, risk: definition.risk, status: "success", durationMs: envelope.meta.durationMs, attempts, artifactIds: envelope.artifactIds });
+      context.audit?.({ at: envelope.meta.completedAt, invocationId, traceId, parentInvocationId, workspaceId, toolId, pluginId: definition.plugin?.id || "", risk: definition.risk, status: "success", durationMs: envelope.meta.durationMs, attempts, artifactIds: envelope.artifactIds, quality });
       return envelope;
     } catch (error) {
       clearTimeout(timer);
@@ -170,8 +181,9 @@ async function executeRegisteredTool(registry, toolId, input, context = {}) {
     }
   }
   const failedAt = new Date(Number(context.now?.() ?? Date.now())).toISOString();
-  context.audit?.({ at: failedAt, invocationId, workspaceId, toolId, risk: definition.risk, status: "error", attempts, error: { code: lastError.code, category: lastError.category, message: lastError.message } });
+  context.audit?.({ at: failedAt, invocationId, traceId, parentInvocationId, workspaceId, toolId, pluginId: definition.plugin?.id || "", risk: definition.risk, status: "error", attempts, error: { code: lastError.code, category: lastError.category, message: lastError.message } });
   lastError.invocationId = invocationId;
+  lastError.traceId = traceId;
   throw lastError;
 }
 

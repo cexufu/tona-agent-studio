@@ -9,7 +9,7 @@ const FEISHU_SYSTEM_SKILLS = [
     enabled: true,
     activationKeywords: ["飞书文档", "云文档", "创建文档", "读取文档", "修改文档", "写入文档", "整理成文档"],
     triggerExamples: ["创建一份飞书文档", "读取这个云文档并总结", "把结论整理成飞书文档"],
-    requiredCapabilities: ["read_feishu_docs", "write_feishu_docs"],
+    requiredCapabilities: ["feishu_document_read", "feishu_document_create"],
     runtimeInstructions: "只有用户明确要求读取或交付文档，或任务确实需要可复用长文产物时才使用。读取必须有明确文档目标；写入必须先确认。若缺权限，暂停原任务并申请对应权限，授权后从断点继续。",
     inputType: "text",
     steps: [{ agentId: "daily_assistant", task: "Clarify the document goal, select read or write, preserve evidence boundaries, and use native Feishu document structure." }]
@@ -24,7 +24,7 @@ const FEISHU_SYSTEM_SKILLS = [
     enabled: true,
     activationKeywords: ["日历", "日程", "会议", "预约", "改期", "参会人", "空闲时间"],
     triggerExamples: ["帮我安排会议", "看看我的日历", "把会议改到下周", "邀请参会人"],
-    requiredCapabilities: ["read_calendar", "write_calendar", "contacts_directory"],
+    requiredCapabilities: ["feishu_calendar_plan"],
     runtimeInstructions: "先解析时间、时区、持续时间、参会人和目标。缺少关键字段时只问最重要的问题。读取需要个人授权；创建、修改、取消和邀请必须展示变更并确认。缺权限时申请权限并保留原任务。",
     inputType: "text",
     steps: [{ agentId: "daily_assistant", task: "Resolve meeting intent and required fields, then plan the minimum confirmed calendar action." }]
@@ -39,7 +39,7 @@ const FEISHU_SYSTEM_SKILLS = [
     enabled: true,
     activationKeywords: ["提醒", "闹钟", "倒计时", "定时", "稍后告诉我", "主动发送", "每天", "每周"],
     triggerExamples: ["半小时后提醒我", "每天九点发日报提醒", "周五提醒我提交材料"],
-    requiredCapabilities: ["proactive_message"],
+    requiredCapabilities: ["schedule_reminder"],
     runtimeInstructions: "必须得到具体时间或可解析延迟、时区、接收会话和提醒内容。发送或创建定时任务前必须确认；到期后只发送一次，除非用户明确要求周期任务。",
     inputType: "text",
     steps: [{ agentId: "daily_assistant", task: "Resolve schedule and delivery target, confirm the reminder, and preserve an idempotent task receipt." }]
@@ -79,7 +79,10 @@ const FEISHU_SYSTEM_SKILLS = [
 function normalize(value) { return String(value || "").toLowerCase().replace(/\s+/g, ""); }
 
 function skillEligible(skill, agent) {
-  if (!skill || skill.enabled === false) return false;
+  if (!skill || skill.enabled === false || ["draft", "deprecated"].includes(skill.status)) return false;
+  if (Array.isArray(agent?.skillBindings)) {
+    return agent.skillBindings.some((binding) => binding.skillId === skill.id && binding.enabled !== false);
+  }
   if (skill.system === true) return true;
   if ((skill.steps || []).some((step) => step.agentId === agent?.id)) return true;
   return (agent?.skills || []).some((tag) => tag === skill.id || normalize(skill.name).includes(normalize(tag)));
@@ -88,7 +91,9 @@ function skillEligible(skill, agent) {
 function skillScore(skill, text) {
   const source = normalize(text);
   if (!source) return 0;
-  const candidates = [...(skill.activationKeywords || []), ...(skill.triggerExamples || []), skill.name]
+  const exclusions = (skill.whenNotToUse || []).map(normalize).filter((item) => item.length >= 2);
+  if (exclusions.some((item) => source.includes(item))) return 0;
+  const candidates = [...(skill.activationKeywords || []), ...(skill.triggerExamples || []), ...(skill.whenToUse || []), skill.name]
     .map(normalize).filter((item) => item.length >= 2);
   let score = 0;
   for (const candidate of candidates) {
@@ -112,7 +117,17 @@ function skillContext(skills = []) {
   if (!skills.length) return "";
   const rows = skills.map((skill) => {
     const capabilities = (skill.requiredCapabilities || []).join(", ") || "none";
-    return `Skill ${skill.id} (${skill.name})\nPurpose: ${skill.description}\nRequired capabilities: ${capabilities}\nRules: ${skill.runtimeInstructions || "Follow the configured workflow and quality contract."}`;
+    const activation = (skill.whenToUse || []).join("; ") || "use only when the request matches the configured examples";
+    const exclusions = (skill.whenNotToUse || []).join("; ") || "none";
+    return [
+      "Skill " + skill.id + " (" + skill.name + ")",
+      "Purpose: " + skill.description,
+      "Version: " + (skill.skillVersion || "1.0.0") + " / " + (skill.status || "published"),
+      "Use when: " + activation,
+      "Do not use when: " + exclusions,
+      "Required capabilities: " + capabilities,
+      "Rules: " + (skill.runtimeInstructions || "Follow the configured workflow and quality contract.")
+    ].join("\n");
   });
   return [
     "Selected Skills for this request:",
