@@ -218,12 +218,14 @@ async function runPaovrd(task, deps) {
         continue;
       }
       const fingerprint = actionFingerprint(action);
-      const prior = task.steps.slice(-2).filter((step) => step.fingerprint === fingerprint);
-      if (prior.length) {
+      const sameAttempts = task.steps.slice(-4).filter((step) => step.fingerprint === fingerprint);
+      const failedAttempts = sameAttempts.filter((step) => step.status === "error");
+      const allowOneRecoveryRetry = sameAttempts.at(-1)?.status === "error" && failedAttempts.length < 2;
+      if (sameAttempts.length && !allowOneRecoveryRetry) {
         task.metrics.noProgress += 1;
-        task.observations.push({ step: task.metrics.steps, toolId: action.toolId, status: "blocked_duplicate", error: "Identical tool call was already attempted.", at: nowIso() });
-        if (task.metrics.noProgress >= 2) {
-          task.status = "waiting_input"; task.pendingQuestion = "任务连续两次没有取得新进展。请补充信息，或明确是否允许调整目标。"; deps.persist?.(task);
+        task.observations.push({ step: task.metrics.steps, toolId: action.toolId, status: "blocked_duplicate", error: "The same tool call produced no new evidence. Replan or use a different input.", at: nowIso() });
+        if (task.metrics.noProgress >= 4) {
+          task.status = "waiting_input"; task.pendingQuestion = "任务经过多次重试和调整仍没有取得新进展。请补充关键输入，或允许我调整目标与方法。"; deps.persist?.(task);
           return { status: task.status, task, message: task.pendingQuestion };
         }
         continue;

@@ -33,6 +33,8 @@ const {
   writeToolEvent,
   prepareRuntimeResearch
 } = require("./runtime/server-support");
+const { FEISHU_SYSTEM_SKILLS, selectApplicableSkills, skillContext } = require("./runtime/skill-runtime");
+const { rememberHumanMessage, fiveLayerMemoryContext } = require("./runtime/memory-runtime");
 
 const PORT = Number(process.env.PORT || 7357);
 const ROOT = __dirname;
@@ -293,7 +295,7 @@ const BUILT_IN_SKILL_RECIPES = {
   document_review:{templateVersion:2,inputGuide:'Provide the document text or an authorized Feishu excerpt and state the review goal: logic, research quality, decision quality, or writing quality.',outputContract:'A prioritized review with issue evidence, revision actions, and an improved outline.',qualityChecklist:['Points to concrete passages or sections','Ranks issues by impact','Separates factual, logical, and stylistic edits'],steps:[{agentId:'research_assistant',task:'Audit the document for unsupported claims, missing evidence, ambiguous terms, factual uncertainty, and unaddressed counterarguments. Cite the relevant supplied section for each issue.'},{agentId:'coding_assistant',task:'Audit structure and reasoning: goal-to-conclusion trace, assumptions, contradictions, sequencing, definitions, and testability. Propose a corrected outline.'},{agentId:'daily_assistant',task:'Deliver a Chinese revision memo: top issues ranked by severity, evidence for each, exact revision action, suggested outline, and a final readiness judgment. Do not rewrite the whole document unless asked.'}]},
   multi_agent_review:{templateVersion:2,inputGuide:'Provide a decision, plan, proposal, or project material plus success criteria, constraints, and deadline.',outputContract:'A converged decision memo with options, trade-offs, decision, owners, and next actions.',qualityChecklist:['At least two viable options considered','Trade-offs are explicit','Final recommendation names conditions and ownership'],steps:[{agentId:'research_assistant',task:'Act as evidence reviewer. Extract objectives, facts, assumptions, unknowns, alternatives, and risks. Identify what evidence would change the recommendation.'},{agentId:'coding_assistant',task:'Act as execution reviewer. Assess feasibility, dependencies, cost or effort, failure modes, measurable milestones, and the minimum viable path.'},{agentId:'daily_assistant',task:'Act as coordinator. Reconcile disagreements and deliver a Chinese decision memo: decision question, options and trade-offs, recommendation, conditions, owners, milestones, risks, and next 3 actions. State any unresolved dispute rather than hiding it.'}]}
 };
-const BUILT_IN_SKILLS = [["skill_creator","\u6280\u80fd\u521b\u5efa\u5668","\u628a\u4e00\u53e5\u5de5\u4f5c\u9700\u6c42\u53d8\u6210\u53ef\u7f16\u8f91\u7684 Skill \u8349\u6848\u3002",1,"daily_assistant","Clarify the intended reusable workflow and return a concise Skill specification."],["skill_test","\u6280\u80fd\u6d4b\u8bd5","\u7528\u6a21\u62df\u8f93\u5165\u8bd5\u8dd1 Skill\uff0c\u68c0\u67e5\u8f93\u51fa\u3001\u6a21\u578b\u548c\u6b65\u9aa4\u95ee\u9898\u3002",1,"coding_assistant","Review the workflow for missing inputs, unsafe actions, unclear handoffs, and concrete test cases."],["feishu_learning","\u98de\u4e66\u8d44\u6599\u5b66\u4e60","\u57fa\u4e8e\u7528\u6237\u660e\u786e\u63d0\u4f9b\u7684\u98de\u4e66\u6587\u6863\u6216\u7fa4\u804a\u6750\u6599\u6574\u7406\u77e5\u8bc6\u4e0e\u53ef\u6267\u884c\u7ed3\u8bba\u3002",0,"research_assistant","Read only user-provided Feishu material. Extract facts, decisions, evidence boundaries, and a reusable knowledge brief."],["research_brief","\u7814\u7a76\u7b80\u62a5","\u628a\u8bba\u6587\u3001\u79d1\u7814\u65b0\u95fb\u6216\u9879\u76ee\u901a\u77e5\u53d8\u6210\u53ef\u884c\u52a8\u7684\u7814\u7a76\u7b80\u62a5\u3002",0,"research_assistant","Extract research question, method, contribution, evidence limits, and relevance."],["meeting_assistant","\u4f1a\u8bae\u52a9\u7406","\u751f\u6210\u4f1a\u524d\u8bae\u7a0b\u3001\u4f1a\u4e2d\u8bb0\u5f55\u6846\u67b6\u548c\u4f1a\u540e\u5f85\u529e\u3002",0,"daily_assistant","Create a focused agenda, decisions to make, note-taking structure, and post-meeting actions."],["daily_report","\u65e5\u62a5\u4e0e\u5468\u62a5","\u628a\u5de5\u4f5c\u4e8b\u9879\u3001\u8fdb\u5c55\u548c\u98ce\u9669\u6574\u7406\u6210\u62a5\u544a\u3002",0,"daily_assistant","Organize progress, blockers, risks, next priorities, and support requests. Do not invent progress."],["copywriting_designer","\u6587\u6848\u8bbe\u8ba1","\u4e3a\u5c0f\u7ea2\u4e66\u3001\u516c\u4f17\u53f7\u6216\u8bb2\u7a3f\u751f\u6210\u9009\u9898\u3001\u7ed3\u6784\u548c\u521d\u7a3f\u3002",0,"research_assistant","Extract credible audience-relevant insights and evidence boundaries."],["document_review","\u6587\u6863\u5ba1\u9605","\u5ba1\u9605\u6587\u672c\u6216\u98de\u4e66\u6587\u6863\u6458\u5f55\uff0c\u8f93\u51fa\u5177\u4f53\u4fee\u6539\u5efa\u8bae\u3002",0,"research_assistant","Review claims, evidence, structure, missing information, and risks. Separate facts from suggestions."],["multi_agent_review","\u591a\u89d2\u8272\u8bc4\u5ba1","\u7528\u7814\u7a76\u3001\u6267\u884c\u548c\u7edf\u7b79\u89d2\u8272\u8bc4\u5ba1\u65b9\u6848\uff0c\u6536\u655b\u4e3a\u51b3\u7b56\u5efa\u8bae\u3002",0,"research_assistant","Evaluate evidence, novelty, assumptions, and research risks, then give a decision-ready recommendation."]].map(([id,name,description,system,agentId,task])=>({id,name,description,system:Boolean(system),triggerExamples:[name],inputType:'text',steps:[{agentId,task}],enabled:true,outputMode:'markdown',builtIn:true,...(BUILT_IN_SKILL_RECIPES[id]||{})}));
+const BUILT_IN_SKILLS = [...([["skill_creator","\u6280\u80fd\u521b\u5efa\u5668","\u628a\u4e00\u53e5\u5de5\u4f5c\u9700\u6c42\u53d8\u6210\u53ef\u7f16\u8f91\u7684 Skill \u8349\u6848\u3002",1,"daily_assistant","Clarify the intended reusable workflow and return a concise Skill specification."],["skill_test","\u6280\u80fd\u6d4b\u8bd5","\u7528\u6a21\u62df\u8f93\u5165\u8bd5\u8dd1 Skill\uff0c\u68c0\u67e5\u8f93\u51fa\u3001\u6a21\u578b\u548c\u6b65\u9aa4\u95ee\u9898\u3002",1,"coding_assistant","Review the workflow for missing inputs, unsafe actions, unclear handoffs, and concrete test cases."],["feishu_learning","\u98de\u4e66\u8d44\u6599\u5b66\u4e60","\u57fa\u4e8e\u7528\u6237\u660e\u786e\u63d0\u4f9b\u7684\u98de\u4e66\u6587\u6863\u6216\u7fa4\u804a\u6750\u6599\u6574\u7406\u77e5\u8bc6\u4e0e\u53ef\u6267\u884c\u7ed3\u8bba\u3002",0,"research_assistant","Read only user-provided Feishu material. Extract facts, decisions, evidence boundaries, and a reusable knowledge brief."],["research_brief","\u7814\u7a76\u7b80\u62a5","\u628a\u8bba\u6587\u3001\u79d1\u7814\u65b0\u95fb\u6216\u9879\u76ee\u901a\u77e5\u53d8\u6210\u53ef\u884c\u52a8\u7684\u7814\u7a76\u7b80\u62a5\u3002",0,"research_assistant","Extract research question, method, contribution, evidence limits, and relevance."],["meeting_assistant","\u4f1a\u8bae\u52a9\u7406","\u751f\u6210\u4f1a\u524d\u8bae\u7a0b\u3001\u4f1a\u4e2d\u8bb0\u5f55\u6846\u67b6\u548c\u4f1a\u540e\u5f85\u529e\u3002",0,"daily_assistant","Create a focused agenda, decisions to make, note-taking structure, and post-meeting actions."],["daily_report","\u65e5\u62a5\u4e0e\u5468\u62a5","\u628a\u5de5\u4f5c\u4e8b\u9879\u3001\u8fdb\u5c55\u548c\u98ce\u9669\u6574\u7406\u6210\u62a5\u544a\u3002",0,"daily_assistant","Organize progress, blockers, risks, next priorities, and support requests. Do not invent progress."],["copywriting_designer","\u6587\u6848\u8bbe\u8ba1","\u4e3a\u5c0f\u7ea2\u4e66\u3001\u516c\u4f17\u53f7\u6216\u8bb2\u7a3f\u751f\u6210\u9009\u9898\u3001\u7ed3\u6784\u548c\u521d\u7a3f\u3002",0,"research_assistant","Extract credible audience-relevant insights and evidence boundaries."],["document_review","\u6587\u6863\u5ba1\u9605","\u5ba1\u9605\u6587\u672c\u6216\u98de\u4e66\u6587\u6863\u6458\u5f55\uff0c\u8f93\u51fa\u5177\u4f53\u4fee\u6539\u5efa\u8bae\u3002",0,"research_assistant","Review claims, evidence, structure, missing information, and risks. Separate facts from suggestions."],["multi_agent_review","\u591a\u89d2\u8272\u8bc4\u5ba1","\u7528\u7814\u7a76\u3001\u6267\u884c\u548c\u7edf\u7b79\u89d2\u8272\u8bc4\u5ba1\u65b9\u6848\uff0c\u6536\u655b\u4e3a\u51b3\u7b56\u5efa\u8bae\u3002",0,"research_assistant","Evaluate evidence, novelty, assumptions, and research risks, then give a decision-ready recommendation."]].map(([id,name,description,system,agentId,task])=>({id,name,description,system:Boolean(system),triggerExamples:[name],inputType:'text',steps:[{agentId,task}],enabled:true,outputMode:'markdown',builtIn:true,...(BUILT_IN_SKILL_RECIPES[id]||{})}))), ...FEISHU_SYSTEM_SKILLS];
 function syncBuiltInSkills(db){db.workflows=Array.isArray(db.workflows)?db.workflows:[];let changed=false;for(const template of BUILT_IN_SKILLS){const index=db.workflows.findIndex((skill)=>skill.id===template.id);if(index<0){db.workflows.push(JSON.parse(JSON.stringify(template)));changed=true;}else if(db.workflows[index].builtIn===true&&Number(db.workflows[index].templateVersion||0)<Number(template.templateVersion||1)){db.workflows[index]=JSON.parse(JSON.stringify(template));changed=true;}}return changed;}
 const CUSTOMER_DEFAULT_AGENT_IDS = new Set(["daily_assistant", "research_assistant", "coding_assistant"]);
 function createInitialDb() {
@@ -447,7 +449,7 @@ function writeDb(db) {
 
 function publicDb(db) {
   const settings = db.settings || {};
-  const { collaborationTasks, groupKnowledge, skillRequests, documentRequests, assistantTasks, runtime, ...safeSettings } = settings;
+  const { collaborationTasks, groupKnowledge, memory, skillRequests, documentRequests, assistantTasks, runtime, ...safeSettings } = settings;
   return {
     ...db,
     providers: db.providers.map((provider) => ({
@@ -1311,6 +1313,8 @@ async function runAgentReply(db, agentId, text, options = {}) {
   const provider = db.providers.find((item) => item.id === agent.providerId) || firstReadyProvider(db);
   if (!provider || !provider.enabled || !provider.apiKey) return "我在，但这个角色还没有可用模型。请先在 TONA 的“模型”页启用一个模型，并在“角色”页绑定给我。";
   const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  const selectedSkills = selectApplicableSkills({ workflows: db.workflows || [], agent, text, limit: 3 });
+  const selectedSkillPrompt = skillContext(selectedSkills);
   let deterministicResult = null;
   if (options.enableTools) {
     try {
@@ -1335,7 +1339,7 @@ async function runAgentReply(db, agentId, text, options = {}) {
   const runtimeEvidence = [deterministicResult?.evidence, runtimeResearch?.ok ? runtimeResearch.evidence : ""].filter(Boolean).join("\n\n");
   const runtimeText = runtimeEvidence ? text + "\n\n" + runtimeEvidence : text;
   const result = await callOpenAICompatible(provider, agent, [
-    { role: "system", content: agentSystemPrompt(agent) + "\n\nYou are speaking in a Feishu chat. Unless the user explicitly asks otherwise, use Chinese. Start with the answer, then use 2-5 short lines or bullets. Do not use Markdown headings, tables, report templates, or long preambles in normal chat. Only give long-form detail when the user asks to expand, draft, or write a plan. In a collaboration, directly engage with the previous contribution rather than repeating it." },
+    { role: "system", content: agentSystemPrompt(agent) + (selectedSkillPrompt ? "\n\n" + selectedSkillPrompt : "") + "\n\nYou are speaking in a Feishu chat. Unless the user explicitly asks otherwise, use Chinese. Start with the answer, then use 2-5 short lines or bullets. Do not use Markdown headings, tables, report templates, or long preambles in normal chat. Only give long-form detail when the user asks to expand, draft, or write a plan. In a collaboration, directly engage with the previous contribution rather than repeating it." },
     { role: "user", content: runtimeText }
   ]);
   let content = result.content;
@@ -1596,6 +1600,11 @@ function messageMentionsBot(db, message, bot) {
   const labels = (message.mentionLabels || []).map(normalizeMentionLabel).filter(Boolean);
   return aliases.some((alias) => labels.includes(alias));
 }
+function groupMessageTargetsBot(db, message, bot, policy) {
+  if (message.hasDirectMention && !message.isAtAll) return messageMentionsBot(db, message, bot);
+  const coordinatorAgentId = policy?.coordinatorAgentId || (db.agents || []).find((agent) => agent.id === "daily_assistant")?.id || db.agents?.[0]?.id || "";
+  return Boolean(coordinatorAgentId && bot.agentId === coordinatorAgentId);
+}
 
 
 function feishuChatText(text) {
@@ -1700,7 +1709,7 @@ function collaborationVisibleMessage(task, db, agentId, content, handoffTarget) 
 }
 
 async function runServerManagedCollaboration(db, task, message, sourceBot) {
-  const groupContext = groupKnowledgeContext(db, message);
+  const groupContext = fiveLayerMemoryContext(db, message, groupKnowledgeContext(db, message));
   task.status = "active";
   task.deliveryErrors = Array.isArray(task.deliveryErrors) ? task.deliveryErrors : [];
   writeDb(db);
@@ -1792,9 +1801,20 @@ function paovrdTaskEntries(db) {
 }
 function createFeishuPaovrdTask(db, message, bot) {
   const workspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  const agent = (db.agents || []).find((item) => item.id === bot?.agentId);
+  const selectedSkills = selectApplicableSkills({
+    workflows: db.workflows || [],
+    agent,
+    text: message.text,
+    limit: 3
+  });
+  const runtimeContext = [
+    fiveLayerMemoryContext(db, message, groupKnowledgeContext(db, message)),
+    skillContext(selectedSkills)
+  ].filter(Boolean).join("\n\n");
   const task = createPaovrdTask({
     goal: message.text,
-    context: groupKnowledgeContext(db, message),
+    context: runtimeContext,
     agentId: bot?.agentId || "daily_assistant",
     workspaceId,
     chatId: message.chatId || "",
@@ -2067,6 +2087,10 @@ async function readFeishuDocument(settings, documentId) {
   if (!lines.length) throw new Error("The document is empty or the app cannot read its blocks.");
   return lines.join("\n").slice(0, 24000);
 }
+function isFeishuPermissionError(error) {
+  const value = String(error?.message || error || "");
+  return /permission|scope|forbidden|access denied|not authorized|99991663|99991672|99991400|无权限|权限不足/i.test(value);
+}
 function scheduleDocumentDelivery(workspaceId, requestId) {
   setImmediate(() => workspaceContext.run({ workspaceId }, async () => {
     const db = readDb(); const request = documentRequestEntries(db).find((item) => item.id === requestId);
@@ -2080,6 +2104,13 @@ function scheduleDocumentDelivery(workspaceId, requestId) {
       request.status = "completed"; request.documentId = document.documentId; request.documentUrl = document.documentUrl; request.completedAt = new Date().toISOString(); request.updatedAt = request.completedAt; writeDb(db);
       await sendFeishuMessageToChat(larkBotToAppSettings(bot), request.requestedInChatId, "interactive", documentDeliveryResultCard(request));
     } catch (error) {
+      if (isFeishuPermissionError(error)) {
+        request.status = "waiting_permission"; request.error = error.message; request.updatedAt = new Date().toISOString(); writeDb(db);
+        const capability = FEISHU_CAPABILITY_REQUESTS.find((item) => item.id === "write_feishu_docs");
+        const permissionRequest = createFeishuSkillRequest(db, capability, { senderId: request.requestedBy, chatId: request.requestedInChatId, messageId: request.requestedMessageId }, bot, { type: "document_delivery", requestId: request.id });
+        try { await sendFeishuMessageToChat(larkBotToAppSettings(bot), request.requestedInChatId, "interactive", capabilityCard(permissionRequest)); } catch (deliveryError) { logServerError(deliveryError); }
+        return;
+      }
       request.status = "failed"; request.error = error.message; request.updatedAt = new Date().toISOString(); writeDb(db);
       try { await sendFeishuMessageToChat(larkBotToAppSettings(bot), request.requestedInChatId, "interactive", documentDeliveryResultCard(request)); } catch (deliveryError) { logServerError(deliveryError); }
     }
@@ -2114,19 +2145,19 @@ function parseFeishuCapabilityRequest(text) {
   if (!/(申请|开通|需要|想要|启用).{0,12}(技能|能力|权限)|(?:技能|能力|权限).{0,8}(申请|开通|需要|启用)/.test(source)) return null;
   return findFeishuCapabilityRequest(source) || { id: "custom_skill", title: source.replace(/^(?:申请|开通|需要|想要|启用)(?:技能|能力|权限)[：:\s]*/u, "").slice(0, 80) || "自定义能力", kind: "implementation_required", scopes: [], purpose: "记录你希望机器人获得的能力，待 TONA 安装对应技能执行器后再启用。", risk: "当前不会自动安装第三方技能、调用外部服务或授予任何权限。" };
 }
-function createFeishuSkillRequest(db, capability, message, bot) {
-  const request = { id: "skill_" + crypto.randomUUID().slice(0, 12), capabilityId: capability.id, title: capability.title, kind: capability.kind, scopes: capability.scopes || [], purpose: capability.purpose, risk: capability.risk, status: "pending", requestedBy: message.senderId || "", requestedInChatId: message.chatId || "", requestedMessageId: message.messageId || "", botId: bot?.id || "", agentId: bot?.agentId || "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+function createFeishuSkillRequest(db, capability, message, bot, resumeTask = null) {
+  const request = { id: "skill_" + crypto.randomUUID().slice(0, 12), capabilityId: capability.id, title: capability.title, kind: capability.kind, scopes: capability.scopes || [], purpose: capability.purpose, risk: capability.risk, status: "pending", requestedBy: message.senderId || "", requestedInChatId: message.chatId || "", requestedMessageId: message.messageId || "", botId: bot?.id || "", botAppId: bot?.appId || "", agentId: bot?.agentId || "", workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, resumeTask, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   const requests = skillRequestEntries(db); requests.push(request); db.settings.skillRequests = requests.slice(-300); writeDb(db); return request;
 }
 function capabilityCard(request) {
   const scopeText = request.scopes.length ? request.scopes.join("、") : "当前没有可直接开通的飞书权限";
-  const actionLabel = request.kind === "app_permission" ? "确认提交申请" : request.kind === "user_oauth" ? "确认授权意图" : "确认记录申请";
+  const actionLabel = request.resumeTask ? "批准并在授权后继续" : request.kind === "app_permission" ? "确认提交申请" : request.kind === "user_oauth" ? "确认授权意图" : "确认记录申请";
   return { config: { wide_screen_mode: true }, header: { title: { tag: "plain_text", content: "TONA 能力与权限申请" }, template: "orange" }, elements: [
     { tag: "div", text: { tag: "lark_md", content: "**申请能力：** " + request.title + "\n\n**用途：** " + request.purpose + "\n\n**涉及权限：** " + scopeText + "\n\n**边界：** " + request.risk } },
     { tag: "note", elements: [{ tag: "plain_text", content: "确认只会记录或发起下一步，不会绕过飞书权限审核，也不会立即执行写入、发送或删除操作。" }] },
     { tag: "action", actions: [
-      { tag: "button", text: { tag: "plain_text", content: actionLabel }, type: "primary", value: { source: "tona_skill_request", requestId: request.id, action: "approve" } },
-      { tag: "button", text: { tag: "plain_text", content: "暂不授权" }, type: "default", value: { source: "tona_skill_request", requestId: request.id, action: "reject" } }
+      { tag: "button", text: { tag: "plain_text", content: actionLabel }, type: "primary", value: { source: "tona_skill_request", requestId: request.id, workspaceId: request.workspaceId, botAppId: request.botAppId, action: "approve" } },
+      { tag: "button", text: { tag: "plain_text", content: "暂不授权" }, type: "default", value: { source: "tona_skill_request", requestId: request.id, workspaceId: request.workspaceId, botAppId: request.botAppId, action: "reject" } }
     ] }
   ] };
 }
@@ -2143,6 +2174,20 @@ function workspaceDbExists(workspaceId) {
   if (!isValidWorkspaceId(workspaceId)) return false;
   if (workspaceId === LEGACY_OWNER_ID) return fs.existsSync(path.join(WORKSPACES_DIR, workspaceId, "studio.json")) || fs.existsSync(ROOT_DB_PATH);
   return fs.existsSync(path.join(WORKSPACES_DIR, workspaceId, "studio.json"));
+}
+function scheduleCapabilityResume(workspaceId, requestId) {
+  setImmediate(() => workspaceContext.run({ workspaceId }, async () => {
+    const db = readDb(); const request = skillRequestEntries(db).find((item) => item.id === requestId);
+    if (!request || request.status !== "approved" || !request.resumeTask) return;
+    if (request.resumeTask.type === "document_delivery") {
+      const documentRequest = documentRequestEntries(db).find((item) => item.id === request.resumeTask.requestId);
+      if (!documentRequest) { request.status = "resume_failed"; request.error = "Original document task no longer exists."; writeDb(db); return; }
+      documentRequest.status = "approved"; documentRequest.error = ""; documentRequest.updatedAt = new Date().toISOString(); request.status = "resuming"; writeDb(db);
+      scheduleDocumentDelivery(workspaceId, documentRequest.id);
+      return;
+    }
+    request.status = "needs_admin"; request.updatedAt = new Date().toISOString(); writeDb(db);
+  }));
 }
 function handleFeishuCardAction(eventBody) {
   const value = cardActionValue(eventBody);
@@ -2209,18 +2254,24 @@ function handleFeishuCardAction(eventBody) {
     scheduleDocumentDelivery(requestedWorkspaceId, request.id);
     return skillRequestToast("success", "\u5df2\u5f00\u59cb\u751f\u6210\u6587\u6863\uff0c\u5b8c\u6210\u540e\u4f1a\u5728\u5f53\u524d\u4f1a\u8bdd\u56de\u4f20\u94fe\u63a5\u3002");
   }
-  const db = readDb();
   if (value.source !== "tona_skill_request" || !value.requestId) return skillRequestToast("warning", "这不是 TONA 的能力申请卡片。");
+  const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
+  const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
+  if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast("warning", "该申请已过期或不属于当前工作区。");
+  const db = workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => readDb());
   const request = skillRequestEntries(db).find((item) => item.id === value.requestId);
-  if (!request) return skillRequestToast("warning", "该申请已过期或不属于当前工作区。");
+  if (!request || (request.workspaceId && request.workspaceId !== requestedWorkspaceId)) return skillRequestToast("warning", "该申请已过期或不属于当前工作区。");
+  const incomingAppId = eventBody?.header?.app_id || eventBody?.app_id || "";
+  if (request.botAppId && request.botAppId !== incomingAppId) return skillRequestToast("warning", "请使用发起申请的原机器人确认授权。");
   const operatorId = cardOperatorId(eventBody);
-  if (request.requestedBy && operatorId && request.requestedBy !== operatorId) return skillRequestToast("warning", "只有发起该申请的用户可以确认。");
+  if (request.requestedBy && operatorId && request.requestedBy !== operatorId) return skillRequestToast("warning", "只有任务所有人可以确认该申请。");
   if (request.status !== "pending") return skillRequestToast("info", "该申请已处理：" + request.status + "。");
   request.approvedBy = operatorId || request.requestedBy || ""; request.updatedAt = new Date().toISOString();
-  if (value.action === "reject") { request.status = "rejected"; writeDb(db); return skillRequestToast("info", "已保留现状，机器人不会启用这项能力。"); }
-  if (request.kind === "app_permission") { request.status = "needs_admin"; writeDb(db); return skillRequestToast("warning", "申请已记录：请在飞书开放平台开通对应权限、发布应用后才会生效。"); }
-  if (request.kind === "user_oauth") { request.status = "oauth_requested"; writeDb(db); return skillRequestToast("success", "授权意图已确认。需要先为该飞书应用配置 OAuth 回调和权限范围，TONA 才会打开个人授权页。"); }
-  request.status = "implementation_requested"; writeDb(db); return skillRequestToast("info", "技能申请已记录；当前版本尚未安装该技能执行器，因此不会自动执行。");
+  if (value.action === "reject") { request.status = "rejected"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db)); return skillRequestToast("info", "已保留现状，原任务保持暂停且不会执行。"); }
+  if (request.resumeTask && request.kind === "app_permission") { request.status = "approved"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db)); scheduleCapabilityResume(requestedWorkspaceId, request.id); return skillRequestToast("success", "已批准继续。TONA 将重试原任务；若飞书后台权限仍未生效，任务会继续保持阻塞。"); }
+  if (request.kind === "app_permission") { request.status = "needs_admin"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db)); return skillRequestToast("warning", "申请已记录：请在飞书开放平台开通对应权限、发布应用后才会生效。"); }
+  if (request.kind === "user_oauth") { request.status = "oauth_requested"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db)); return skillRequestToast("success", "授权意图已确认。完成个人 OAuth 后，原任务会从授权断点继续。"); }
+  request.status = "implementation_requested"; workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => writeDb(db)); return skillRequestToast("info", "能力申请已记录；执行器接入前不会声称任务已经完成。");
 }
 
 async function processFeishuMessageEvent(eventBody, botConfig = null) {
@@ -2233,7 +2284,10 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
 
   const policy = normalizeCollaborationPolicy(db.settings?.collaborationPolicy, db.agents);
   const isHumanSender = !message.senderType || message.senderType === "user";
-  if (isHumanSender) rememberGroupKnowledge(db, message);
+  if (isHumanSender) {
+    rememberGroupKnowledge(db, message);
+    if (rememberHumanMessage(db, message)) writeDb(db);
+  }
   let task = null;
   let conversation = null;
   let capabilityPlan = null;
@@ -2248,7 +2302,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
   } else {
     if (message.chatType === "group") {
       await hydrateLarkBotIdentity(db, bot);
-      if (!messageMentionsBot(db, message, bot)) return;
+      if (!groupMessageTargetsBot(db, message, bot, policy)) return;
     }
     const waitingTask = latestWaitingPaovrdTask(db, message, bot);
     if (waitingTask) {
@@ -2286,7 +2340,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
     if (requestedCapability) {
       const capabilityDefinition = FEISHU_CAPABILITY_REQUESTS.find((item) => item.id === requestedCapability.capabilityId);
       if (capabilityDefinition) {
-        const request = createFeishuSkillRequest(db, capabilityDefinition, message, bot);
+        const request = createFeishuSkillRequest(db, capabilityDefinition, message, bot, { type: "feishu_message", text: message.text, chatId: message.chatId, messageId: message.messageId, senderId: message.senderId });
         await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, capabilityCard(request));
         return;
       }
@@ -2330,7 +2384,7 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
 
   let replyText = "";
   try {
-    const groupContext = groupKnowledgeContext(db, message);
+    const groupContext = fiveLayerMemoryContext(db, message, groupKnowledgeContext(db, message));
     let promptText = message.text;
     if (!task && wantsFeishuDocumentRead(message.text)) {
       const documentId = extractFeishuDocumentId(message.text);
