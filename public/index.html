@@ -251,18 +251,27 @@
                 </section>
                 <section class="agent-tab-panel" data-agent-panel="runtime">
                   <div class="form-grid">
+                    <label>执行内核<select name="openWorkerBackend"><option value="openworker">OpenWorker（推荐）</option><option value="legacy">旧 TONA Runtime（回退）</option></select></label>
+                    <label>Worker 类型<select name="openWorkerAgent"><option value="cowork">Cowork · 通用办公</option><option value="code">Code · 文件与终端</option><option value="chat">Chat · 只对话</option></select></label>
+                    <label>执行模式<select name="openWorkerMode"><option value="interactive">Interactive · 写入前确认</option><option value="plan">Plan · 先审计划</option><option value="auto">Auto · 批准后自主执行</option><option value="discuss">Discuss · 只读讨论</option></select></label>
+                    <label>模型覆盖<input name="openWorkerModel" placeholder="留空则跟随当前 Agent 模型" /></label>
+                    <label class="span-2">OpenWorker 工作区<input name="openWorkerWorkspace" placeholder="留空使用线上隔离工作区；本地 Worker 可填写授权目录" /></label>
+                  </div>
+                  <p class="meta">身份、风格、目标和约束继续由 TONA Agent 管理；规划、Todo、工具循环、审批与终端执行交给 OpenWorker。Code Worker 的命令仍须经过 OpenWorker 权限门。</p>
+                  <details><summary>旧内核回退预算</summary><div class="form-grid">
                     <label>最大步骤<input name="runtimeMaxSteps" type="number" min="1" max="20" /></label><label>最大工具调用<input name="runtimeMaxToolCalls" type="number" min="1" max="20" /></label>
                     <label>最大模型调用<input name="runtimeMaxModelCalls" type="number" min="2" max="30" /></label><label>最大重规划<input name="runtimeMaxReplans" type="number" min="0" max="8" /></label>
                     <label>最长执行秒数<input name="runtimeMaxDurationSec" type="number" min="10" max="600" /></label><label>回复模式<select name="runtimeReplyMode"><option value="adaptive">自动</option><option value="quick">简短</option><option value="standard">标准</option><option value="detailed">详细</option></select></label>
-                    <label class="span-2"><input name="runtimeAllowCollaboration" type="checkbox" />允许该 Agent 发起有界多 Agent 协作</label>
-                    <label class="span-2"><input name="delegationCanDelegate" type="checkbox" />&#20801;&#35768;&#35843;&#29992;&#20854;&#20182; Agent &#20316;&#20026;&#23376;&#20351;&#32773;</label>
-                    <label>&#26368;&#22823;&#22996;&#27966;&#28145;&#24230;<input name="delegationMaxDepth" type="number" min="0" max="2" /></label><label>&#24182;&#21457;&#23376;&#20351;&#32773;<input name="delegationMaxConcurrent" type="number" min="1" max="4" /></label>
-                    <label>&#21333;&#20219;&#21153;&#26368;&#22810;&#23376;&#20351;&#32773;<input name="delegationMaxTotal" type="number" min="1" max="8" /></label>
-                    <label class="span-2">&#21487;&#35843;&#29992;&#30340; Agent<select id="agentCallableAgents" multiple size="4"></select></label>
-                    <label class="span-2">&#20801;&#35768;&#21738;&#20123; Agent &#35843;&#29992;&#25105;<select id="agentCallableByAgents" multiple size="4"></select></label>
+                    <label class="span-2"><input name="runtimeAllowCollaboration" type="checkbox" />允许旧内核发起有界多 Agent 协作</label>
+                  </div></details>
+                  <div class="form-grid">
+                    <label class="span-2"><input name="delegationCanDelegate" type="checkbox" />允许调用其他 Agent 作为子使者</label>
+                    <label>最大委派深度<input name="delegationMaxDepth" type="number" min="0" max="2" /></label><label>并发子使者<input name="delegationMaxConcurrent" type="number" min="1" max="4" /></label>
+                    <label>单任务最多子使者<input name="delegationMaxTotal" type="number" min="1" max="8" /></label>
+                    <label class="span-2">可调用的 Agent<select id="agentCallableAgents" multiple size="4"></select></label>
+                    <label class="span-2">允许哪些 Agent 调用我<select id="agentCallableByAgents" multiple size="4"></select></label>
                   </div>
-                </section>
-                <section class="agent-tab-panel" data-agent-panel="usage"><div id="agentUsagePanel" class="agent-overview-grid"></div><div id="agentTaskSummary" class="run-list"></div></section>
+                </section>                <section class="agent-tab-panel" data-agent-panel="usage"><div id="agentUsagePanel" class="agent-overview-grid"></div><div id="agentTaskSummary" class="run-list"></div></section>
               </form>
             </section>
           </div>
@@ -326,6 +335,29 @@
             </div>
             <button class="primary" id="saveRuntimeButton" type="button">保存工具配置</button>
           </div>
+          <section class="panel openworker-console">
+            <div class="panel-heading"><div><h3>行走台 · OpenWorker 内核</h3><p class="meta">TONA 负责线上入口与配置，OpenWorker 负责计划、Todo、工具、审批、文件与终端。</p></div><span id="openWorkerReadyBadge" class="pill disabled">检测中</span></div>
+            <div class="runtime-layout">
+              <form id="openWorkerForm" class="form-grid">
+                <label>内核状态<select name="enabled"><option value="true">启用</option><option value="false">停用并回退</option></select></label>
+                <label>部署方式<select name="deployment"><option value="embedded">Render 内嵌</option><option value="remote">远程 / 本地 Worker</option></select></label>
+                <label class="span-2">OpenWorker 地址<input name="baseUrl" type="url" placeholder="http://127.0.0.1:7360 或远程 HTTPS 地址" /></label>
+                <label class="span-2">访问令牌<input name="apiToken" type="password" placeholder="已配置时显示遮罩；留空保留" /></label>
+                <label>默认 Worker<select name="defaultAgent"><option value="cowork">Cowork</option><option value="code">Code</option><option value="chat">Chat</option></select></label>
+                <label>默认模式<select name="defaultMode"><option value="interactive">Interactive</option><option value="plan">Plan</option><option value="auto">Auto</option><option value="discuss">Discuss</option></select></label>
+                <label>模型凭证同步<select name="syncProviders"><option value="true">开启（内嵌推荐）</option><option value="false">关闭（远程推荐）</option></select></label>
+                <label class="span-2">默认工作区<input name="defaultWorkspace" placeholder="Render: /var/data/openworker/workspace" /></label>
+                <div class="button-row span-2"><button id="saveOpenWorkerButton" class="primary" type="button">保存内核配置</button><button id="testOpenWorkerButton" type="button">测试连接</button><button id="syncOpenWorkerSkillsButton" type="button">同步全部 Skill</button></div>
+              </form>
+              <div><div id="openWorkerStatus" class="runtime-status"></div><div id="openWorkerSessions" class="run-list"></div></div>
+            </div>
+            <div class="terminal-console">
+              <div class="panel-heading"><h3>线上终端任务</h3><span class="pill">审批受控</span></div>
+              <textarea id="openWorkerPrompt" placeholder="例如：在工作区检查项目结构，运行测试并总结失败原因。"></textarea>
+              <div class="button-row"><select id="openWorkerAgentSelect"><option value="cowork">Cowork</option><option value="code">Code / Terminal</option><option value="chat">Chat</option></select><select id="openWorkerModeSelect"><option value="interactive">Interactive</option><option value="plan">Plan first</option><option value="auto">Auto</option><option value="discuss">Discuss</option></select><button id="runOpenWorkerButton" class="primary" type="button">交给 OpenWorker</button></div>
+              <pre id="openWorkerOutput">等待任务。</pre>
+            </div>
+          </section>
           <div class="runtime-layout">
             <section class="panel">
               <div class="panel-heading"><h3>联网搜索</h3><span id="runtimeReadyBadge">尚未配置</span></div>

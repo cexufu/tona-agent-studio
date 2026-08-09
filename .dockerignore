@@ -1,0 +1,7 @@
+.git
+node_modules
+teamflow-lite/node_modules
+data
+tmp
+*.log
+python-runner

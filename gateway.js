@@ -1,13 +1,21 @@
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 7357);
 const TONA_PORT = Number(process.env.TONA_INTERNAL_PORT || 7358);
 const TEAMFLOW_PORT = Number(process.env.TEAMFLOW_INTERNAL_PORT || 7359);
+const OPENWORKER_PORT = Number(process.env.OPENWORKER_INTERNAL_PORT || 7360);
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
 const TEAMFLOW_DATA_DIR = process.env.TEAMFLOW_DATA_DIR || path.join(DATA_DIR, 'teamflow');
+const OPENWORKER_MODE = process.env.OPENWORKER_MODE || (process.env.NODE_ENV === 'production' ? 'embedded' : 'disabled');
+const OPENWORKER_ENABLED = process.env.OPENWORKER_ENABLED !== 'false' && OPENWORKER_MODE !== 'disabled';
+const OPENWORKER_STATE_DIR = process.env.OPENWORKER_STATE_DIR || path.join(DATA_DIR, 'openworker', 'state');
+const OPENWORKER_WORKSPACE = process.env.OPENWORKER_WORKSPACE || path.join(DATA_DIR, 'openworker', 'workspace');
+const OPENWORKER_API_TOKEN = process.env.OPENWORKER_API_TOKEN || crypto.randomBytes(32).toString('hex');
 const children = new Map();
 let shuttingDown = false;
 
@@ -17,6 +25,11 @@ function childEnvironment(name, port) {
     env.DATA_DIR = DATA_DIR;
     env.TONA_HUB_AUTH_REQUIRED = 'true';
     env.TEAMFLOW_INTERNAL_PORT = String(TEAMFLOW_PORT);
+    env.OPENWORKER_ENABLED = String(OPENWORKER_ENABLED);
+    env.OPENWORKER_MODE = OPENWORKER_MODE;
+    env.OPENWORKER_URL = process.env.OPENWORKER_URL || `http://127.0.0.1:${OPENWORKER_PORT}`;
+    env.OPENWORKER_API_TOKEN = OPENWORKER_API_TOKEN;
+    env.OPENWORKER_WORKSPACE = OPENWORKER_WORKSPACE;
   } else {
     env.DATA_DIR = TEAMFLOW_DATA_DIR;
     env.INITIAL_ADMIN_PASSWORD = process.env.TEAMFLOW_INITIAL_ADMIN_PASSWORD || process.env.INITIAL_ADMIN_PASSWORD || 'teamflow123';
@@ -24,6 +37,25 @@ function childEnvironment(name, port) {
     env.APP_PUBLIC_URL = process.env.TEAMFLOW_PUBLIC_URL || (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/teamflow` : `http://localhost:${PORT}/teamflow`);
   }
   return env;
+}
+
+function startOpenWorker() {
+  if (!OPENWORKER_ENABLED || OPENWORKER_MODE === 'remote' || shuttingDown) return;
+  fs.mkdirSync(OPENWORKER_STATE_DIR, { recursive: true });
+  fs.mkdirSync(OPENWORKER_WORKSPACE, { recursive: true });
+  const command = process.env.OPENWORKER_EXECUTABLE || 'openworker-server';
+  const args = ['--cwd', OPENWORKER_WORKSPACE, '--host', '127.0.0.1', '--port', String(OPENWORKER_PORT), '--mode', process.env.OPENWORKER_DEFAULT_MODE || 'interactive'];
+  const env = { ...process.env, COWORKER_API_TOKEN: OPENWORKER_API_TOKEN, COWORKER_STATE_DIR: OPENWORKER_STATE_DIR };
+  const child = spawn(command, args, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  children.set('openworker', child);
+  child.stdout.on('data', chunk => process.stdout.write(`[openworker] ${chunk}`));
+  child.stderr.on('data', chunk => process.stderr.write(`[openworker] ${chunk}`));
+  child.on('error', error => console.error(`[gateway] OpenWorker failed to start: ${error.message}`));
+  child.on('exit', (code, signal) => {
+    children.delete('openworker');
+    console.error(`[gateway] openworker exited (${code ?? signal})`);
+    if (!shuttingDown) setTimeout(startOpenWorker, 3000).unref();
+  });
 }
 
 function startChild(name, cwd, port) {
@@ -68,9 +100,10 @@ async function check(port, pathName) {
 const gateway = http.createServer(async (req, res) => {
   const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
   if (pathname === '/gateway/health') {
-    const [tona, teamflow] = await Promise.all([check(TONA_PORT, '/'), check(TEAMFLOW_PORT, '/api/health')]);
-    res.writeHead(tona && teamflow ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ ok: tona && teamflow, gateway: true, tona, teamflow }));
+    const [tona, teamflow, openworker] = await Promise.all([check(TONA_PORT, '/'), check(TEAMFLOW_PORT, '/api/health'), OPENWORKER_ENABLED && OPENWORKER_MODE !== 'remote' ? check(OPENWORKER_PORT, '/v1/health') : Promise.resolve(false)]);
+    const ready = tona && teamflow && (!OPENWORKER_ENABLED || OPENWORKER_MODE === 'remote' || openworker);
+    res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ ok: ready, gateway: true, tona, teamflow, openworker: { enabled: OPENWORKER_ENABLED, mode: OPENWORKER_MODE, ready: openworker } }));
   }
   // TONA_HUB_ENTRY_GATE_V1: unauthenticated visitors always start at the Hub login page.
   const hasSession = /(?:^|;\s*)teamflow_session=/.test(String(req.headers.cookie || ''));
@@ -87,6 +120,7 @@ const gateway = http.createServer(async (req, res) => {
 
 startChild('tona', ROOT, TONA_PORT);
 startChild('teamflow', path.join(ROOT, 'teamflow-lite'), TEAMFLOW_PORT);
+startOpenWorker();
 
 gateway.listen(PORT, '0.0.0.0', () => console.log(`[gateway] TONA at http://localhost:${PORT}/ and TeamFlow at http://localhost:${PORT}/teamflow/`));
 
