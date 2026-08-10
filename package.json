@@ -4,18 +4,16 @@
   "private": true,
   "description": "TONA Agent Studio with an integrated TeamFlow workspace.",
   "scripts": {
-    "postinstall": "node scripts/install-openworker.js",
     "start": "node gateway.js",
     "start:tona": "node server.js",
     "start:teamflow": "node teamflow-lite/server.js",
     "check": "node --check gateway.js && node --check server.js && npm --prefix teamflow-lite run check",
-    "test": "node tests/openworker-render-install.js && node tests/openworker-compat.js && node tests/openworker-api.js && npm --prefix teamflow-lite test && node tests/policy-kernel.js && node tests/python-runtime.js && node tests/subagent-runtime.js && node tests/harness-upgrade.js && node tests/skill-runtime.js && node tests/agent-profile.js && node tests/agent-studio-ui.js && node tests/five-layer-memory.js && node tests/secrets-encryption.js && node tests/lark-secret-preservation.js && node tests/kimi-model-migration.js && node tests/deepseek-model-migration.js && node tests/collaboration-policy.js && node tests/feishu-conversation-memory.js && node tests/gateway-smoke.js && node tests/skill-request-cards.js && node tests/feishu-document-tools.js && node tests/calendar-planning.js && node tests/server-managed-collaboration.js && node tests/feishu-long-replies.js && node tests/builtin-skills.js && node tests/studio-admin-features.js && node tests/research-hub-entry.js && node tests/runtime-v2.js && node tests/runtime-v2-policies.js && node tests/plugins-memory.js && node tests/isolated-executor.js && node tests/workspace-files.js && node tests/pdf-tools.js && node tests/feishu-oauth.js && node tests/feishu-oauth-api.js && node tests/agent-runtime-tools.js && node tests/capability-planner.js && node tests/paovrd-runtime-v3.js && node tests/paovrd-feishu.js && node tests/scheduled-reminders.js && node tests/files-api.js && node tests/files-ui.js && node tests/runtime-tools.js && node tests/runtime-api.js"
+    "test": "npm --prefix teamflow-lite test && node tests/policy-kernel.js && node tests/python-runtime.js && node tests/subagent-runtime.js && node tests/harness-upgrade.js && node tests/skill-runtime.js && node tests/agent-profile.js && node tests/agent-studio-ui.js && node tests/five-layer-memory.js && node tests/secrets-encryption.js && node tests/lark-secret-preservation.js && node tests/kimi-model-migration.js && node tests/deepseek-model-migration.js && node tests/collaboration-policy.js && node tests/feishu-conversation-memory.js && node tests/gateway-smoke.js && node tests/skill-request-cards.js && node tests/feishu-document-tools.js && node tests/calendar-planning.js && node tests/server-managed-collaboration.js && node tests/feishu-long-replies.js && node tests/builtin-skills.js && node tests/studio-admin-features.js && node tests/research-hub-entry.js && node tests/runtime-v2.js && node tests/runtime-v2-policies.js && node tests/plugins-memory.js && node tests/isolated-executor.js && node tests/workspace-files.js && node tests/pdf-tools.js && node tests/feishu-oauth.js && node tests/feishu-oauth-api.js && node tests/agent-runtime-tools.js && node tests/capability-planner.js && node tests/paovrd-runtime-v3.js && node tests/paovrd-feishu.js && node tests/scheduled-reminders.js && node tests/files-api.js && node tests/files-ui.js && node tests/runtime-tools.js && node tests/runtime-api.js"
   },
   "engines": {
     "node": ">=20.16.0"
   },
   "dependencies": {
-    "pdf-parse": "^2.4.5",
-    "ws": "^8.21.0"
+    "pdf-parse": "^2.4.5"
   }
 }

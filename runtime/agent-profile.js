@@ -109,13 +109,6 @@ function normalizeAgentProfile(agent, { workflows = [], toolCatalog = [], bots =
     channelBindings: channelBindingsForAgent(agent.id, bots),
     memoryPolicy: normalizeMemoryPolicy(agent.memoryPolicy),
     runtimePolicy: normalizeRuntimePolicy(agent.runtimePolicy),
-    openWorker: {
-      backend: agent.openWorker?.backend === "legacy" ? "legacy" : "openworker",
-      agent: ["cowork", "code", "chat"].includes(agent.openWorker?.agent) ? agent.openWorker.agent : (/code|编程|开发/i.test(String(agent.id || "") + String(agent.role || "")) ? "code" : "cowork"),
-      mode: ["discuss", "plan", "interactive", "auto"].includes(agent.openWorker?.mode) ? agent.openWorker.mode : "interactive",
-      workspace: String(agent.openWorker?.workspace || "").slice(0, 1000),
-      model: String(agent.openWorker?.model || "").slice(0, 200)
-    },
     delegationPolicy: normalizeDelegationPolicy(agent.delegationPolicy)
   };
 }

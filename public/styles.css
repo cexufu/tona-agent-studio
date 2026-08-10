@@ -793,13 +793,3 @@ select[multiple] { min-height: 108px; }
   .task-depth-1, .task-depth-2 { margin-left: 14px; }
   .tool-contract details { max-width: 82vw; }
 }
-.openworker-console { margin-bottom: 20px; }
-.openworker-console > .runtime-layout { margin-top: 14px; }
-.terminal-console { margin-top: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #111814; color: #eaf7ef; }
-.terminal-console textarea { min-height: 110px; background: #19231e; color: #eaf7ef; border-color: #31443a; }
-.terminal-console select { background: #19231e; color: #eaf7ef; border-color: #31443a; }
-.terminal-console pre { min-height: 140px; max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-word; padding: 14px; border-radius: 8px; background: #09100c; color: #b9f6cf; }
-.session-row { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; margin-bottom: 8px; }
-.session-row span { color: var(--muted); font-size: 12px; }
-.task-checkpoint { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface) 86%, var(--accent) 14%); }
-.task-checkpoint p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }

@@ -6,7 +6,6 @@ const state = {
   selectedLarkBotId: null,
   modelUsage: null,
   runtime: null,
-  openWorker: null,
   assistantTasks: [],
   currentAgentTab: "overview",
   taskFilter: "active",
@@ -78,11 +77,10 @@ function currentWorkflow() {
 }
 
 async function loadState() {
-  const [db, modelUsage, runtime, openWorker] = await Promise.all([api("/api/state"), api("/api/model-usage"), api("/api/runtime"), api("/api/openworker")]);
+  const [db, modelUsage, runtime] = await Promise.all([api("/api/state"), api("/api/model-usage"), api("/api/runtime")]);
   state.db = db;
   state.modelUsage = modelUsage;
   state.runtime = runtime;
-  state.openWorker = openWorker;
   state.selectedProviderId ||= state.db.providers[0]?.id;
   state.selectedAgentId ||= state.db.agents[0]?.id;
   state.selectedWorkflowId ||= state.db.workflows[0]?.id;
@@ -97,7 +95,6 @@ function renderAll() {
   renderProviders();
   renderModelUsage();
   renderRuntime();
-  renderOpenWorker();
   renderProviderForm();
   renderAgentProviderSelect();
   renderAgents();
@@ -112,25 +109,6 @@ function renderAll() {
   renderLarkAppDiagnosis();
   refreshAssistantHealth();
 }
-
-function openWorkerFormPayload() {
-  const data = formData(document.querySelector("#openWorkerForm"));
-  return { enabled:data.enabled === "true",deployment:data.deployment,baseUrl:data.baseUrl,apiToken:data.apiToken,defaultAgent:data.defaultAgent,defaultMode:data.defaultMode,defaultWorkspace:data.defaultWorkspace,syncProviders:data.syncProviders === "true" };
-}
-function renderOpenWorker() {
-  const form=document.querySelector("#openWorkerForm"); if(!form||!state.openWorker)return;
-  const settings=state.openWorker.settings||{}; setForm(form,settings);
-  const badge=document.querySelector("#openWorkerReadyBadge"); badge.textContent=state.openWorker.ready?"内核在线":"内核离线"; badge.className="pill "+(state.openWorker.ready?"enabled":"disabled");
-  const health=state.openWorker.health||{};
-  document.querySelector("#openWorkerStatus").innerHTML='<p><strong>状态：</strong>'+escapeHtml(health.status||"offline")+'</p><p><strong>部署：</strong>'+escapeHtml(settings.deployment||"embedded")+'</p><p><strong>地址：</strong>'+escapeHtml(settings.baseUrl||"")+'</p><p><strong>模型：</strong>'+escapeHtml(health.model||"由 Agent / OpenWorker 决定")+'</p><p><strong>可用 Worker：</strong>'+escapeHtml((state.openWorker.agents||[]).map((item)=>item.name||item.id||item).join(" / ")||"等待连接")+'</p>';
-  document.querySelector("#openWorkerSessions").innerHTML=(state.openWorker.sessions||[]).slice(0,8).map((session)=>'<button type="button" class="session-row" data-openworker-session="'+escapeHtml(session.session_id)+'"><strong>'+escapeHtml(session.title||session.session_id)+'</strong><span>'+escapeHtml(session.liveness||session.mode||"idle")+'</span></button>').join("")||'<p class="meta">还没有 OpenWorker 会话。</p>';
-  document.querySelectorAll("[data-openworker-session]").forEach((button)=>button.addEventListener("click",()=>loadOpenWorkerSession(button.dataset.openworkerSession)));
-}
-async function saveOpenWorker(){const result=await api("/api/openworker",{method:"POST",body:JSON.stringify(openWorkerFormPayload())});state.openWorker={...state.openWorker,...result};state.openWorker=await api("/api/openworker");renderOpenWorker();toast("OpenWorker 内核配置已保存");}
-async function testOpenWorker(){try{await saveOpenWorker();await api("/api/openworker/test",{method:"POST",body:"{}"});toast("OpenWorker 连接正常");}catch(error){toast(error.message);}}
-async function syncOpenWorkerSkills(){try{const result=await api("/api/openworker/sync-skills",{method:"POST",body:"{}"});const ok=(result.results||[]).filter((item)=>item.ok).length;toast("已同步 "+ok+" 个 Skill");state.openWorker=await api("/api/openworker");renderOpenWorker();}catch(error){toast(error.message);}}
-async function runOpenWorker(){const prompt=document.querySelector("#openWorkerPrompt").value.trim();if(!prompt)return toast("请先输入任务");const output=document.querySelector("#openWorkerOutput");output.textContent="任务已提交，OpenWorker 正在规划与执行……";try{const result=await api("/api/openworker/run",{method:"POST",body:JSON.stringify({prompt,agentId:state.selectedAgentId,workerAgent:document.querySelector("#openWorkerAgentSelect").value,mode:document.querySelector("#openWorkerModeSelect").value})});output.textContent="任务 "+result.task.id+" 已进入后台。可在江湖令查看 Todo、工具进度和审批。";setActiveView("tasks");await loadAssistantTasks();}catch(error){output.textContent=error.message;}}
-async function loadOpenWorkerSession(sessionId){try{const result=await api("/api/openworker/sessions/"+encodeURIComponent(sessionId)+"/messages");document.querySelector("#openWorkerOutput").textContent=(result.messages||[]).map((item)=>{const text=typeof item.content==="string"?item.content:JSON.stringify(item.content||item);return (item.role||"event")+": "+text;}).join("\n\n")||"该会话还没有消息。";}catch(error){toast(error.message);}}
 
 function runtimeFormPayload() {
   const form = document.querySelector("#runtimeForm");
@@ -200,7 +178,6 @@ async function saveRuntime() {
   const result = await api("/api/runtime", { method: "POST", body: JSON.stringify(runtimeFormPayload()) });
   state.runtime = { ...state.runtime, ...result, tools: state.runtime.tools };
   renderRuntime();
-  renderOpenWorker();
   toast("Runtime 工具配置已保存");
 }
 
@@ -215,7 +192,6 @@ async function testRuntime() {
     resultBox.innerHTML = "测试通过：" + escapeHtml(result.provider) + "<br>" + result.sources.map((source, index) => (index + 1) + ". " + escapeHtml(source.title)).join("<br>");
     state.runtime = await api("/api/runtime");
     renderRuntime();
-  renderOpenWorker();
   } catch (error) {
     resultBox.textContent = error.message;
   } finally {
@@ -669,9 +645,9 @@ function renderAgentDelegation(agent) {
   if (callers) callers.innerHTML = options(callableBy);
 }
 function renderAgentForm() {
-  const existing = currentAgent(); const defaults = { id:"",name:"",providerId:state.db.providers[0]?.id||"",model:state.db.providers[0]?.defaultModel||"",temperature:0.3,role:"",style:"",goals:"",guardrails:"",outputFormat:"",openWorker:{backend:"openworker",agent:"cowork",mode:"interactive",workspace:"",model:""},skillBindings:state.db.workflows.filter((item)=>item.system).map((item)=>({skillId:item.id,enabled:true})),toolPolicy:{allowedToolIds:(state.runtime?.tools||[]).filter((item)=>item.status!=="planned").map((item)=>item.id)},memoryPolicy:{scope:"agent",core:true,semantic:true,task:true,episodic:true,shortTerm:true,retentionDays:90},runtimePolicy:{maxSteps:8,maxToolCalls:6,maxModelCalls:10,maxReplans:2,maxDurationMs:120000,allowCollaboration:true,replyMode:"adaptive"},delegationPolicy:{canDelegate:true,callableAgentIds:[],callableByAgentIds:[],maxDepth:1,maxConcurrentChildren:2,maxTotalChildren:4} };
+  const existing = currentAgent(); const defaults = { id:"",name:"",providerId:state.db.providers[0]?.id||"",model:state.db.providers[0]?.defaultModel||"",temperature:0.3,role:"",style:"",goals:"",guardrails:"",outputFormat:"",skillBindings:state.db.workflows.filter((item)=>item.system).map((item)=>({skillId:item.id,enabled:true})),toolPolicy:{allowedToolIds:(state.runtime?.tools||[]).filter((item)=>item.status!=="planned").map((item)=>item.id)},memoryPolicy:{scope:"agent",core:true,semantic:true,task:true,episodic:true,shortTerm:true,retentionDays:90},runtimePolicy:{maxSteps:8,maxToolCalls:6,maxModelCalls:10,maxReplans:2,maxDurationMs:120000,allowCollaboration:true,replyMode:"adaptive"},delegationPolicy:{canDelegate:true,callableAgentIds:[],callableByAgentIds:[],maxDepth:1,maxConcurrentChildren:2,maxTotalChildren:4} };
   const agent = existing || defaults; document.querySelector("#agentEditorTitle").textContent = agent.name || "新建 Agent"; document.querySelector("#agentEditorSummary").textContent = agent.role || "从身份、能力和渠道开始配置。";
-  setForm(document.querySelector("#agentForm"), { ...agent, memoryScope:agent.memoryPolicy?.scope||'agent',memoryRetentionDays:agent.memoryPolicy?.retentionDays||90,runtimeMaxSteps:agent.runtimePolicy?.maxSteps||8,runtimeMaxToolCalls:agent.runtimePolicy?.maxToolCalls||6,runtimeMaxModelCalls:agent.runtimePolicy?.maxModelCalls||10,runtimeMaxReplans:agent.runtimePolicy?.maxReplans??2,runtimeMaxDurationSec:Math.round((agent.runtimePolicy?.maxDurationMs||120000)/1000),runtimeReplyMode:agent.runtimePolicy?.replyMode||"adaptive",openWorkerBackend:agent.openWorker?.backend||"openworker",openWorkerAgent:agent.openWorker?.agent||"cowork",openWorkerMode:agent.openWorker?.mode||"interactive",openWorkerWorkspace:agent.openWorker?.workspace||"",openWorkerModel:agent.openWorker?.model||"",delegationMaxDepth:agent.delegationPolicy?.maxDepth??1,delegationMaxConcurrent:agent.delegationPolicy?.maxConcurrentChildren||2,delegationMaxTotal:agent.delegationPolicy?.maxTotalChildren||4 });
+  setForm(document.querySelector("#agentForm"), { ...agent, memoryScope:agent.memoryPolicy?.scope||'agent',memoryRetentionDays:agent.memoryPolicy?.retentionDays||90,runtimeMaxSteps:agent.runtimePolicy?.maxSteps||8,runtimeMaxToolCalls:agent.runtimePolicy?.maxToolCalls||6,runtimeMaxModelCalls:agent.runtimePolicy?.maxModelCalls||10,runtimeMaxReplans:agent.runtimePolicy?.maxReplans??2,runtimeMaxDurationSec:Math.round((agent.runtimePolicy?.maxDurationMs||120000)/1000),runtimeReplyMode:agent.runtimePolicy?.replyMode||'adaptive',delegationMaxDepth:agent.delegationPolicy?.maxDepth??1,delegationMaxConcurrent:agent.delegationPolicy?.maxConcurrentChildren||2,delegationMaxTotal:agent.delegationPolicy?.maxTotalChildren||4 });
   setChecked('memoryCore',agent.memoryPolicy?.core); setChecked('memorySemantic',agent.memoryPolicy?.semantic); setChecked('memoryTask',agent.memoryPolicy?.task); setChecked('memoryEpisodic',agent.memoryPolicy?.episodic); setChecked('memoryShortTerm',agent.memoryPolicy?.shortTerm); setChecked('runtimeAllowCollaboration',agent.runtimePolicy?.allowCollaboration); setChecked('delegationCanDelegate',agent.delegationPolicy?.canDelegate); renderAgentDelegation(agent);
   renderAgentBindings(agent); renderAgentChannel(agent); renderAgentOverview(agent); renderAgentUsage(agent); setActiveAgentTab(state.currentAgentTab);
 }
@@ -761,10 +737,8 @@ async function saveAgent(event) {
   data.toolPolicy = { mode:"selected", allowedToolIds:Array.from(document.querySelectorAll("[data-agent-tool]:checked")).map((input)=>input.dataset.agentTool) };
   data.memoryPolicy = { scope:data.memoryScope,retentionDays:Number(data.memoryRetentionDays||90),core:form.elements.memoryCore.checked,semantic:form.elements.memorySemantic.checked,task:form.elements.memoryTask.checked,episodic:form.elements.memoryEpisodic.checked,shortTerm:form.elements.memoryShortTerm.checked };
   data.runtimePolicy = { maxSteps:Number(data.runtimeMaxSteps||8),maxToolCalls:Number(data.runtimeMaxToolCalls||6),maxModelCalls:Number(data.runtimeMaxModelCalls||10),maxReplans:Number(data.runtimeMaxReplans||0),maxDurationMs:Number(data.runtimeMaxDurationSec||120)*1000,allowCollaboration:form.elements.runtimeAllowCollaboration.checked,replyMode:data.runtimeReplyMode };
-  data.openWorker = { backend:data.openWorkerBackend||"openworker",agent:data.openWorkerAgent||"cowork",mode:data.openWorkerMode||"interactive",workspace:data.openWorkerWorkspace||"",model:data.openWorkerModel||"" };
   data.delegationPolicy = { canDelegate:form.elements.delegationCanDelegate.checked,callableAgentIds:Array.from(document.querySelectorAll("#agentCallableAgents option:checked")).map((item)=>item.value),callableByAgentIds:Array.from(document.querySelectorAll("#agentCallableByAgents option:checked")).map((item)=>item.value),maxDepth:Number(data.delegationMaxDepth||1),maxConcurrentChildren:Number(data.delegationMaxConcurrent||2),maxTotalChildren:Number(data.delegationMaxTotal||4) };
   for (const key of Object.keys(data)) if (/^(memory|runtime|delegation)(Scope|Retention|Max|Reply|Allow|Can|Core|Semantic|Task|Episodic|Short)/.test(key)) delete data[key];
-  for (const key of ["openWorkerBackend","openWorkerAgent","openWorkerMode","openWorkerWorkspace","openWorkerModel"]) delete data[key];
   const result = await api("/api/agents", { method:"POST", body:JSON.stringify(data) }); state.selectedAgentId = result.agent.id; await loadState(); state.currentAgentTab = "overview"; renderAgentForm(); toast("Agent 已保存");
 }
 
@@ -1014,19 +988,17 @@ function renderAssistantTasks(){
   const byParent=new Map();
   for(const task of visible){const key=task.parentTaskId||'';if(!byParent.has(key))byParent.set(key,[]);byParent.get(key).push(task);}
   const renderTask=(task,depth=0)=>{
-    const canPause=task.type==='scheduled_reminder'&&task.status==='scheduled',canResume=task.type==='scheduled_reminder'&&task.status==='paused',canApprove=task.type==='openworker'&&task.status==='waiting_confirmation',canAnswer=task.type==='openworker'&&task.status==='waiting_input',canContinue=task.type==='openworker'&&['failed','cancelled'].includes(task.status),canCancel=taskIsActive(task);
+    const canPause=task.type==='scheduled_reminder'&&task.status==='scheduled',canResume=task.type==='scheduled_reminder'&&task.status==='paused',canCancel=taskIsActive(task);
     const metrics=task.metrics||{}; const metricText=[metrics.steps!=null?'步骤 '+metrics.steps:'',metrics.toolCalls!=null?'工具 '+metrics.toolCalls:'',metrics.modelCalls!=null?'模型 '+metrics.modelCalls:'',metrics.subagents!=null?'子使者 '+metrics.subagents:''].filter(Boolean).join(' · ');
     const output=task.output?.summary||task.error||'';
-    const checkpoint=task.output?.checkpoint;
-    const checkpointHtml=checkpoint?'<div class="task-checkpoint"><strong>执行检查点</strong><p>停止/暂停位置：'+escapeHtml(checkpoint.stoppedAt||task.phase||'unknown')+'</p><p>已完成：'+escapeHtml((checkpoint.completedItems||[]).join('；')||'尚无已完成的工具步骤')+'</p>'+((checkpoint.remainingItems||[]).length?'<p>尚未完成：'+escapeHtml(checkpoint.remainingItems.join('；'))+'</p>':'')+(checkpoint.resumeHint?'<p>如何继续：'+escapeHtml(checkpoint.resumeHint)+'</p>':'')+'</div>':'';
-    const card='<article class="task-card task-depth-'+Math.min(depth,2)+'"><div><h3>'+escapeHtml(task.title||task.goal||task.intent||task.type)+'</h3><p>'+escapeHtml(task.type)+' · '+escapeHtml(task.status)+(task.runAt?' · '+escapeHtml(new Date(task.runAt).toLocaleString('zh-CN')):'')+'</p><div class="pill-row"><span class="pill">'+escapeHtml(task.agentId||'未指定 Agent')+'</span>'+(task.parentAgentId?'<span class="pill">由 '+escapeHtml(task.parentAgentId)+' 委派</span>':'')+(task.phase?'<span class="pill">'+escapeHtml(task.phase)+'</span>':'')+'</div>'+(metricText?'<p class="meta">'+escapeHtml(metricText)+'</p>':'')+(output?'<p class="meta">'+escapeHtml(output.slice(0,300))+'</p>':'')+checkpointHtml+'</div><div class="button-row">'+(canPause?'<button data-task-action="pause" data-task-id="'+escapeHtml(task.id)+'">暂停</button>':'')+(canResume?'<button data-task-action="resume" data-task-id="'+escapeHtml(task.id)+'">恢复</button>':'')+(canApprove?'<button class="primary" data-task-action="approve" data-task-id="'+escapeHtml(task.id)+'">允许本次</button><button data-task-action="deny" data-task-id="'+escapeHtml(task.id)+'">拒绝</button>':'')+(canAnswer?'<button class="primary" data-task-action="answer" data-task-id="'+escapeHtml(task.id)+'">补充信息</button>':'')+(canContinue?'<button class="primary" data-task-action="continue" data-task-id="'+escapeHtml(task.id)+'">继续执行</button>':'')+(canCancel?'<button class="danger" data-task-action="cancel" data-task-id="'+escapeHtml(task.id)+'">取消</button>':'')+'</div></article>';
+    const card='<article class="task-card task-depth-'+Math.min(depth,2)+'"><div><h3>'+escapeHtml(task.title||task.goal||task.intent||task.type)+'</h3><p>'+escapeHtml(task.type)+' · '+escapeHtml(task.status)+(task.runAt?' · '+escapeHtml(new Date(task.runAt).toLocaleString('zh-CN')):'')+'</p><div class="pill-row"><span class="pill">'+escapeHtml(task.agentId||'未指定 Agent')+'</span>'+(task.parentAgentId?'<span class="pill">由 '+escapeHtml(task.parentAgentId)+' 委派</span>':'')+(task.phase?'<span class="pill">'+escapeHtml(task.phase)+'</span>':'')+'</div>'+(metricText?'<p class="meta">'+escapeHtml(metricText)+'</p>':'')+(output?'<p class="meta">'+escapeHtml(output.slice(0,300))+'</p>':'')+'</div><div class="button-row">'+(canPause?'<button data-task-action="pause" data-task-id="'+escapeHtml(task.id)+'">暂停</button>':'')+(canResume?'<button data-task-action="resume" data-task-id="'+escapeHtml(task.id)+'">恢复</button>':'')+(canCancel?'<button class="danger" data-task-action="cancel" data-task-id="'+escapeHtml(task.id)+'">取消</button>':'')+'</div></article>';
     return card+(byParent.get(task.id)||[]).map((child)=>renderTask(child,depth+1)).join('');
   };
   const roots=visible.filter((task)=>!task.parentTaskId||!visible.some((item)=>item.id===task.parentTaskId));
   box.innerHTML=roots.map((task)=>renderTask(task)).join('')||'<p class="meta">当前没有匹配的任务。</p>';
   box.querySelectorAll('[data-task-action]').forEach((button)=>button.addEventListener('click',()=>updateAssistantTask(button.dataset.taskId,button.dataset.taskAction)));
 }
-async function updateAssistantTask(id,action){try{const answer=action==='answer'?window.prompt('请补充 OpenWorker 继续执行所需的信息：',''):'';if(action==='answer'&&!answer)return;await api('/api/assistant-tasks/'+encodeURIComponent(id)+'/action',{method:'POST',body:JSON.stringify({action,answer})});await loadAssistantTasks();toast('任务状态已更新');}catch(error){toast(error.message);}}
+async function updateAssistantTask(id,action){try{await api('/api/assistant-tasks/'+encodeURIComponent(id)+'/action',{method:'POST',body:JSON.stringify({action})});await loadAssistantTasks();toast('任务状态已更新');}catch(error){toast(error.message);}}
 
 function bindEvents() {
   $$(".nav-item").forEach((button) => {
@@ -1058,10 +1030,6 @@ function bindEvents() {
   $("#sendToLarkButton").addEventListener("click", sendToLark);
   bindIfPresent("#saveRuntimeButton", "click", saveRuntime);
   bindIfPresent("#testRuntimeButton", "click", testRuntime);
-  bindIfPresent("#saveOpenWorkerButton", "click", saveOpenWorker);
-  bindIfPresent("#testOpenWorkerButton", "click", testOpenWorker);
-  bindIfPresent("#syncOpenWorkerSkillsButton", "click", syncOpenWorkerSkills);
-  bindIfPresent("#runOpenWorkerButton", "click", runOpenWorker);
   bindIfPresent("#providerForm", "submit", saveProvider);
   bindIfPresent("#agentForm", "submit", saveAgent);
   bindIfPresent("#deleteAgentButton", "click", deleteSelectedAgent);

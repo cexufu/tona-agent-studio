@@ -1,12 +1,12 @@
-# TONA AI Studio · OpenWorker Core
+# TONA AI Harness
 
-> 把 OpenWorker 的计划、Todo、文件与终端能力，连接到 TONA 的 Agent、Skill、飞书和 24 小时在线工作区。
+> 把模型、角色、技能、工具、记忆与飞书连接成一个可管理的个人 AI 工作系统。
 
-[在线体验](https://tona-agent-studio.onrender.com/) · [OpenWorker 内核说明](docs/OPENWORKER_CORE.md) · [申请接入](#申请接入) · [能力概览](#现在可以做什么) · [安全与边界](#安全与边界)
+[在线体验](https://tona-agent-studio.onrender.com/) · [申请接入](#申请接入) · [能力概览](#现在可以做什么) · [安全与边界](#安全与边界)
 
 **当前阶段：Private Beta / 邀请制内测**
 
-TONA 不是另一个聊天框。它是 OpenWorker 的线上产品层：保留可配置的 Agent、Skill、记忆、飞书入口和 Render 常驻服务，把任务规划、Todo、工具、文件、终端、审批与中断交给 OpenWorker 执行。旧 TONA Runtime 仅作为可显式选择的回退。
+TONA 不是另一个聊天框。它是一套面向个人与小团队的 **AI Harness**：让不同大模型获得清晰角色、可复用技能、受控工具、连续记忆和飞书工作入口，并在同一套治理规则下协作与交付。
 
 ```mermaid
 flowchart LR
@@ -43,7 +43,6 @@ TONA 把这些层连接起来，让 AI 从“一个会聊天的模型”变成�
 | 能力 | 当前支持 |
 | --- | --- |
 | 多模型接入 | OpenAI、DeepSeek、Kimi / Moonshot、豆包 / 火山方舟，以及 OpenAI-compatible API |
-| OpenWorker 内核 | 内嵌或远程部署；支持 Cowork / Code / Chat、会话、Todo、工具轨迹、审批、中断与续做 |
 | AI 角色 | 创建和编辑角色定位、目标、边界、风格、输出格式、模型与技能 |
 | Skill Center | 配置研究、报告、写作、审校等可复用技能和顺序工作流 |
 | 飞书机器人 | 一个飞书应用机器人绑定一个角色；统一公网回调，按工作区与 App ID 路由 |

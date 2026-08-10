@@ -42,8 +42,6 @@ const { rememberHumanMessage, fiveLayerMemoryContext } = require("./runtime/memo
 const { normalizeAgentProfile, syncAgentProfiles, allowedToolIds, filterToolsForAgent, capabilityAllowed, filterCapabilityPlan, runtimeBudget } = require("./runtime/agent-profile");
 const { compileToolPolicy, normalizePolicy } = require("./runtime/policy-kernel");
 const { SubagentScheduler, a2aRequest, createBudgetPool, publicSubagentTask } = require("./runtime/subagent-runtime");
-const { OpenWorkerClient, publicOpenWorkerSettings, normalizeOpenWorkerSettings } = require("./runtime/openworker-client");
-const { openWorkerSettings, openWorkerReady, createOpenWorkerTask, executeOpenWorkerTask, resolveOpenWorkerTask, continueOpenWorkerTask, publicOpenWorkerTask, taskCheckpoint } = require("./runtime/openworker-integration");
 
 const PORT = Number(process.env.PORT || 7357);
 const ROOT = __dirname;
@@ -2047,129 +2045,6 @@ function collaborationPlanFromCapabilityAction(db, bot, action) {
   if (selected.length < 2) return null;
   return { coordinatorAgentId: bot.agentId, participantAgentIds: selected, writerAgentId: selected[selected.length - 1], rounds: Math.min(3, Math.max(1, Number(action.rounds) || 2)) };
 }
-function openWorkerTaskEntries(db) {
-  return assistantTaskEntries(db).filter((item) => item.type === "openworker");
-}
-function openWorkerBinding(agent, settings) {
-  const configured = agent?.openWorker || {};
-  const inferredAgent = /code|编程|开发/i.test(String(agent?.id || "") + " " + String(agent?.role || "")) ? "code" : "cowork";
-  return {
-    workerAgent: configured.agent || inferredAgent || settings.defaultAgent,
-    mode: configured.mode || settings.defaultMode,
-    workspace: configured.workspace || settings.defaultWorkspace,
-    model: configured.model || agent?.model || ""
-  };
-}
-function openWorkerIdentityPrompt(agent, text) {
-  const identity = [
-    agent?.name ? `TONA Agent: ${agent.name}` : "",
-    agent?.role ? `Role: ${agent.role}` : "",
-    agent?.style ? `Working style: ${agent.style}` : "",
-    agent?.goals ? `Goals: ${agent.goals}` : "",
-    agent?.guardrails ? `Guardrails: ${agent.guardrails}` : "",
-    agent?.outputFormat ? `Output contract: ${agent.outputFormat}` : ""
-  ].filter(Boolean).join("\n");
-  return identity ? `${identity}\n\nUser request:\n${text}` : text;
-}
-function createFeishuOpenWorkerTask(db, message, bot, agent) {
-  const settings = openWorkerSettings(db);
-  const binding = openWorkerBinding(agent, settings);
-  const selectedSkills = selectApplicableSkills({ workflows: db.workflows || [], agent, text: message.text, limit: 1 });
-  const task = createOpenWorkerTask({
-    goal: openWorkerIdentityPrompt(agent, message.text), title: message.text, agentId: agent.id,
-    workerAgent: binding.workerAgent, mode: binding.mode, workspace: binding.workspace, model: binding.model,
-    workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, botId: bot?.id || "", botAppId: bot?.appId || "",
-    chatId: message.chatId || "", chatType: message.chatType || "", threadId: message.rootId || message.parentId || "",
-    messageId: message.messageId || "", requestedBy: message.senderId || ""
-  });
-  task.skillDefinition = selectedSkills[0] || null;
-  const tasks = assistantTaskEntries(db); tasks.push(task); db.settings.assistantTasks = tasks.slice(-300); writeDb(db); return task;
-}
-function persistOpenWorkerTask(db, task) {
-  const tasks = assistantTaskEntries(db); const index = tasks.findIndex((item) => item.id === task.id);
-  if (index >= 0) tasks[index] = task; else tasks.push(task);
-  db.settings.assistantTasks = tasks.slice(-300); writeDb(db);
-}
-async function executeOpenWorkerAssistantTask(db, task) {
-  const settings = openWorkerSettings(db);
-  const client = new OpenWorkerClient(settings);
-  if (settings.syncProviders) {
-    const agent = (db.agents || []).find((item) => item.id === task.agentId);
-    const provider = (db.providers || []).find((item) => item.id === agent?.providerId);
-    if (provider?.enabled && provider.apiKey) {
-      try {
-        const syncedProvider = await client.syncProvider(provider, task.model || agent?.model || provider.defaultModel);
-        if (syncedProvider.model) task.model = syncedProvider.model;
-      } catch (error) {
-        task.trace.push({ at: new Date().toISOString(), phase: "provider_sync", status: "warning", preview: String(error.message || error).slice(0, 500) });
-      }
-    }
-  }
-  if (task.skillDefinition) {
-    try {
-      const synced = await client.syncSkill(task.skillDefinition, task.workspace || "");
-      if (synced?.ok !== false) task.skill = String(task.skillDefinition.id || task.skillDefinition.name || "").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 64);
-    } catch (error) {
-      task.trace.push({ at: new Date().toISOString(), phase: "skill_sync", status: "warning", preview: String(error.message || error).slice(0, 500) });
-    }
-  }
-  return executeOpenWorkerTask(task, { settings, persist: () => persistOpenWorkerTask(db, task) });
-}
-function openWorkerPendingCard(task) {
-  const pending = task.pendingAction || {};
-  const isQuestion = pending.kind === "question";
-  return {
-    config: { wide_screen_mode: true },
-    header: { title: { tag: "plain_text", content: isQuestion ? "OpenWorker 需要补充信息" : "OpenWorker 等待确认" }, template: isQuestion ? "blue" : "orange" },
-    elements: [
-      { tag: "div", text: { tag: "lark_md", content: `**任务：** ${compactText(task.title || task.goal, 300)}\n\n**停在：** ${pending.title || pending.kind || "需要确认"}\n\n${compactText(pending.body || "OpenWorker 在继续执行前需要你的决定。", 1200)}` } },
-      ...(isQuestion ? [] : [{ tag: "note", elements: [{ tag: "plain_text", content: "批准只作用于当前 OpenWorker Inbox 请求；终端命令、写入和外部发送仍由 OpenWorker 权限引擎约束。" }] }]),
-      { tag: "action", actions: isQuestion ? [] : [
-        { tag: "button", text: { tag: "plain_text", content: "允许本次并继续" }, type: "primary", value: { source: "tona_openworker", taskId: task.id, workspaceId: task.workspaceId, botAppId: task.botAppId, action: "approve" } },
-        { tag: "button", text: { tag: "plain_text", content: "拒绝" }, type: "default", value: { source: "tona_openworker", taskId: task.id, workspaceId: task.workspaceId, botAppId: task.botAppId, action: "reject" } }
-      ] }
-    ]
-  };
-}
-function openWorkerOutcomeText(task, outcome) {
-  const checkpoint = task.output?.checkpoint || taskCheckpoint(task, outcome);
-  const parts = [outcome.message || task.output?.summary || task.error || checkpoint.reason];
-  if (outcome.status !== "completed") {
-    parts.push(`\n停止/暂停位置：${checkpoint.stoppedAt || task.phase || "unknown"}`);
-    parts.push(`已完成：${checkpoint.completedItems?.length ? checkpoint.completedItems.join("；") : "尚无已完成的工具步骤"}`);
-    if (checkpoint.remainingItems?.length) parts.push(`尚未完成：${checkpoint.remainingItems.join("；")}`);
-    if (checkpoint.resumeHint) parts.push(`如何继续：${checkpoint.resumeHint}`);
-    parts.push(`任务编号：${task.id}；OpenWorker session：${task.sessionId}`);
-  }
-  return parts.filter(Boolean).join("\n");
-}
-async function deliverOpenWorkerOutcome(db, bot, task, outcome, replyMessageId = "") {
-  const settings = larkBotToAppSettings(bot);
-  if (["waiting_confirmation", "waiting_input"].includes(outcome.status)) {
-    const card = openWorkerPendingCard(task);
-    return replyMessageId ? replyFeishuInteractiveCard(settings, replyMessageId, card) : sendFeishuMessageToChat(settings, task.chatId, "interactive", card);
-  }
-  const titles = { completed: "OpenWorker 任务完成", running: "OpenWorker 正在后台工作", failed: "OpenWorker 任务失败", cancelled: "OpenWorker 任务已终止" };
-  const text = openWorkerOutcomeText(task, outcome);
-  const post = feishuPostContent(text, titles[outcome.status] || "OpenWorker 任务进展");
-  if (!replyMessageId && task.requestedBy) post.zh_cn.content.unshift([{ tag: "at", user_id: task.requestedBy, user_name: "任务发起人" }, { tag: "text", text: " OpenWorker 有新的执行结果。" }]);
-  return replyMessageId ? replyFeishuMessagePayload(settings, replyMessageId, "post", post) : sendFeishuMessageToChat(settings, task.chatId, "post", post);
-}
-function scheduleOpenWorkerContinuation(workspaceId, taskId) {
-  const continueTask = async () => {
-    const db = readDb(); const task = openWorkerTaskEntries(db).find((item) => item.id === taskId); if (!task || task.status !== "running") return;
-    const bot = (db.settings?.larkBots || []).find((item) => item.id === task.botId && item.enabled !== false);
-    try {
-      const outcome = await continueOpenWorkerTask(task, { settings: openWorkerSettings(db), persist: () => persistOpenWorkerTask(db, task) });
-      if (bot && task.chatId) await deliverOpenWorkerOutcome(db, bot, task, outcome);
-    } catch (error) { task.status = "failed"; task.error = String(error.message || error).slice(0, 1000); persistOpenWorkerTask(db, task); }
-  };
-  setImmediate(() => workspaceId ? workspaceContext.run({ workspaceId }, continueTask) : continueTask());
-}
-function latestWaitingOpenWorkerTask(db, message, bot) {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  return openWorkerTaskEntries(db).slice().reverse().find((task) => ["waiting_input", "waiting_confirmation"].includes(task.status) && task.chatId === message.chatId && (!task.requestedBy || task.requestedBy === message.senderId) && (!task.botId || task.botId === bot?.id) && Date.parse(task.updatedAt || 0) >= cutoff) || null;
-}
 function paovrdTaskEntries(db) {
   return assistantTaskEntries(db).filter((item) => item.type === "paovrd");
 }
@@ -2407,7 +2282,6 @@ function schedulePaovrdResume(workspaceId, taskId) {
 }
 function publicAssistantTask(task) {
   if (task.type === "paovrd") return publicPaovrdTask(task);
-  if (task.type === "openworker") return publicOpenWorkerTask(task);
   if (task.type === "subagent") return publicSubagentTask(task);
   return { id: task.id, type: task.type, title: task.title || task.reminderText || "任务", status: task.status, agentId: task.agentId || "", botId: task.botId || "", runAt: task.runAt || "", timeZone: task.timeZone || "", attempts: Number(task.attempts || 0), error: task.error || task.lastError || "", createdAt: task.createdAt, updatedAt: task.updatedAt };
 }
@@ -2428,7 +2302,7 @@ function calendarTaskCard(task) { return { config:{wide_screen_mode:true}, heade
   {tag:'action',actions:[{tag:'button',text:{tag:'plain_text',content:'\u786e\u8ba4\u7ee7\u7eed\u5904\u7406'},type:'primary',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'approve'}},{tag:'button',text:{tag:'plain_text',content:'\u6682\u4e0d\u5b89\u6392'},type:'default',value:{source:'tona_calendar_plan',taskId:task.id,workspaceId:task.workspaceId,botAppId:task.botAppId,action:'reject'}}]}
 ]}; }
 function calendarTaskResultPost(task) { return feishuPostContent('\u65e5\u7a0b\u4efb\u52a1\u5df2\u8bb0\u5f55\uff1a'+task.title+'\n\n\u5f53\u524d\u72b6\u6001\uff1a\u7b49\u5f85\u4e2a\u4eba\u65e5\u5386\u6388\u6743\u63a5\u5165\u3002\n\n\u4f60\u53ef\u7ee7\u7eed\u8865\u5145\u53c2\u4f1a\u4eba\u3001\u65f6\u95f4\u7a97\u53e3\u548c\u4f1a\u8bae\u65f6\u957f\uff1bTONA \u4f1a\u5728\u6388\u6743\u5b8c\u6210\u540e\u751f\u6210\u5019\u9009\u65f6\u95f4\u5e76\u518d\u6b21\u8bf7\u4f60\u786e\u8ba4\u3002','\u65e5\u7a0b\u52a9\u7406'); }
-function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth','scheduled','running','waiting_confirmation','waiting_input','completed_with_limits','failed'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); const workerReady=openWorkerReady(db); const executionProviders=workerReady?[...providersReady.map((provider)=>provider.name),'OpenWorker 内核']:providersReady.map((provider)=>provider.name); return {status:!enabledBots.length||!executionProviders.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:executionProviders,replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title||item.goal||'PAOVRD 任务',status:item.status,updatedAt:item.updatedAt}))}; }
+function assistantHealth(db) { const events=listLarkEventLogs(30); const latest=events[0]||null; const bots=allLarkBots(db); const enabledBots=bots.filter((bot)=>bot.enabled!==false&&bot.appId&&bot.appSecret); const replyFailures=events.filter((item)=>item.replyError||item.decryptError).slice(0,5); const pendingTasks=assistantTaskEntries(db).filter((item)=>['pending_confirmation','awaiting_calendar_oauth','scheduled','running','waiting_confirmation','waiting_input','completed_with_limits','failed'].includes(item.status)).slice(-12).reverse(); const providersReady=(db.providers||[]).filter((provider)=>provider.enabled&&provider.apiKey); return {status:!enabledBots.length||!providersReady.length?'setup_needed':replyFailures.length?'attention':'ready',latestEventAt:latest?.receivedAt||'',latestEventSummary:latest?.textPreview||'',botsReady:enabledBots.length,providersReady:providersReady.map((provider)=>provider.name),replyFailures,pendingTasks:pendingTasks.map((item)=>({id:item.id,type:item.type,title:item.title||item.goal||'PAOVRD 任务',status:item.status,updatedAt:item.updatedAt}))}; }
 function documentRequestEntries(db) {
   db.settings ||= {};
   db.settings.documentRequests = Array.isArray(db.settings.documentRequests) ? db.settings.documentRequests : [];
@@ -2641,24 +2515,9 @@ function scheduleCapabilityResume(workspaceId, requestId) {
     request.status = "needs_admin"; request.updatedAt = new Date().toISOString(); writeDb(db);
   }));
 }
-async function handleFeishuCardAction(eventBody) {
+function handleFeishuCardAction(eventBody) {
   const value = cardActionValue(eventBody);
-  if (value.source === "tona_openworker" && value.taskId) {
-    const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
-    const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
-    if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast("warning", "该 OpenWorker 任务已经过期或不属于当前工作区。");
-    const db = workspaceContext.run({ workspaceId: requestedWorkspaceId }, () => readDb());
-    const task = openWorkerTaskEntries(db).find((item) => item.id === value.taskId);
-    if (!task || task.workspaceId !== requestedWorkspaceId) return skillRequestToast("warning", "该 OpenWorker 任务已经过期。");
-    const incomingAppId = eventBody?.header?.app_id || eventBody?.app_id || "";
-    if (task.botAppId && task.botAppId !== incomingAppId) return skillRequestToast("warning", "请使用发起任务的原机器人确认。");
-    const operatorId = cardOperatorId(eventBody);
-    if (task.requestedBy && operatorId && task.requestedBy !== operatorId) return skillRequestToast("warning", "只有任务发起人可以确认。");
-    if (task.status !== "waiting_confirmation") return skillRequestToast("info", "该任务当前状态：" + task.status + "。");
-    await resolveOpenWorkerTask(task, value.action === "reject" ? "deny" : "allow", { settings: openWorkerSettings(db) });
-    persistOpenWorkerTask(db, task); scheduleOpenWorkerContinuation(requestedWorkspaceId, task.id);
-    return value.action === "reject" ? skillRequestToast("info", "已拒绝本次操作，OpenWorker 将根据拒绝结果继续收尾。") : skillRequestToast("success", "已允许本次操作，OpenWorker 正从原任务断点继续。");
-  }  if (value.source === "tona_paovrd" && value.taskId) {
+  if (value.source === "tona_paovrd" && value.taskId) {
     const callbackWorkspaceId = activeWorkspaceId() || LEGACY_OWNER_ID;
     const requestedWorkspaceId = isValidWorkspaceId(value.workspaceId) ? value.workspaceId : callbackWorkspaceId;
     if (!workspaceDbExists(requestedWorkspaceId)) return skillRequestToast("warning", "该任务已经过期或不属于当前工作区。");
@@ -2786,27 +2645,10 @@ async function processFeishuMessageEvent(eventBody, botConfig = null) {
       await deliverPaovrdOutcome(db, bot, waitingTask, outcome, message.messageId);
       return;
     }
-    const waitingWorkerTask = latestWaitingOpenWorkerTask(db, message, bot);
-    if (waitingWorkerTask?.status === "waiting_input") {
-      await resolveOpenWorkerTask(waitingWorkerTask, message.text, { settings: openWorkerSettings(db) });
-      persistOpenWorkerTask(db, waitingWorkerTask); scheduleOpenWorkerContinuation(activeWorkspaceId() || LEGACY_OWNER_ID, waitingWorkerTask.id);
-      await replyFeishuMessage(larkBotToAppSettings(bot), message.messageId, "已收到补充信息，OpenWorker 正从原会话继续执行。");
-      return;
-    }
-    if (waitingWorkerTask?.status === "waiting_confirmation") {
-      await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, openWorkerPendingCard(waitingWorkerTask));
-      return;
-    }
     const capability = parseFeishuCapabilityRequest(message.text);
     if (capability) {
       const request = createFeishuSkillRequest(db, capability, message, bot);
       await replyFeishuInteractiveCard(larkBotToAppSettings(bot), message.messageId, capabilityCard(request));
-      return;
-    }
-    if (openWorkerReady(db)) {
-      const workerTask = createFeishuOpenWorkerTask(db, message, bot, agent);
-      const outcome = await executeOpenWorkerAssistantTask(db, workerTask);
-      await deliverOpenWorkerOutcome(db, bot, workerTask, outcome, message.messageId);
       return;
     }
     capabilityPlan = await planFeishuCapabilities(db, bot, message);
@@ -3040,7 +2882,7 @@ async function handleFeishuEvent(req, res, receivedBody = null) {
       return sendJson(res, 200, { challenge: eventBody.challenge });
     }
     if (!decryptError && /^card\.action\.trigger(?:_v1)?$/.test(eventBody.header?.event_type || eventBody.event_type || "")) {
-      return sendJson(res, 200, await handleFeishuCardAction(eventBody));
+      return sendJson(res, 200, handleFeishuCardAction(eventBody));
     }
     const eventLogDir = larkEventLogDir();
     fs.mkdirSync(eventLogDir, { recursive: true });
@@ -3124,34 +2966,11 @@ async function handleApiInWorkspace(req, res, pathname) {
       const body = await readBody(req); const db = readDb(); const task = assistantTaskEntries(db).find((item) => item.id === assistantTaskActionMatch[1]);
       if (!task) return sendJson(res, 404, { error: "Task not found." });
       const action = String(body.action || ""); const terminal = ["completed", "completed_with_limits", "sent", "failed", "cancelled", "rejected", "resume_failed"].includes(task.status);
-      if (task.type === "openworker" && ["approve", "deny", "answer"].includes(action) && task.pendingAction) {
-        const resolution = action === "approve" ? "allow" : action === "deny" ? "deny" : String(body.answer || "").trim();
-        if (!resolution) return sendJson(res, 400, { error: "An answer is required." });
-        await resolveOpenWorkerTask(task, resolution, { settings: openWorkerSettings(db) }); persistOpenWorkerTask(db, task);
-        scheduleOpenWorkerContinuation(activeWorkspaceId(), task.id);
-        return sendJson(res, 200, { task: publicOpenWorkerTask(task) });
-      }
-      if (task.type === "openworker" && action === "continue" && ["failed", "cancelled"].includes(task.status)) {
-        const workspaceId = activeWorkspaceId();
-        task.status = "queued"; task.phase = "queued"; task.error = ""; task.pendingAction = null;
-        task.continuationPrompt = String(body.prompt || "请从上次中断的位置继续原任务；先核对已完成内容，避免重复执行已有副作用。").slice(0, 4000);
-        task.updatedAt = new Date().toISOString(); persistOpenWorkerTask(db, task);
-        const continueTask = async () => {
-          const latestDb = readDb(); const saved = openWorkerTaskEntries(latestDb).find((item) => item.id === task.id); if (!saved) return;
-          const nextOutcome = await executeOpenWorkerAssistantTask(latestDb, saved);
-          const bot = (latestDb.settings?.larkBots || []).find((item) => item.id === saved.botId && item.enabled !== false);
-          if (bot && saved.chatId) await deliverOpenWorkerOutcome(latestDb, bot, saved, nextOutcome).catch(logServerError);
-        };
-        setImmediate(() => workspaceId ? workspaceContext.run({ workspaceId }, continueTask) : continueTask());
-        return sendJson(res, 202, { task: publicOpenWorkerTask(task) });
-      }      if (action === "cancel" && !terminal) {
-        if (task.type === "openworker") await new OpenWorkerClient(openWorkerSettings(db)).interrupt(task.sessionId).catch(() => ({}));
-        task.status = "cancelled"; task.phase = "interrupted"; task.pendingAction = null; task.output = { ...(task.output || {}), checkpoint: taskCheckpoint(task, { status: "cancelled" }) };
-        for (const child of assistantTaskEntries(db).filter((item) => item.parentTaskId === task.id && !["completed","failed","cancelled","timed_out","refused"].includes(item.status))) { child.status = "cancelled"; child.updatedAt = new Date().toISOString(); }
-      }
+      if (action === "cancel" && !terminal) { task.status = "cancelled"; task.pendingAction = null; for (const child of assistantTaskEntries(db).filter((item) => item.parentTaskId === task.id && !["completed","failed","cancelled","timed_out","refused"].includes(item.status))) { child.status = "cancelled"; child.updatedAt = new Date().toISOString(); } }
       else if (action === "pause" && task.type === "scheduled_reminder" && task.status === "scheduled") task.status = "paused";
       else if (action === "resume" && task.type === "scheduled_reminder" && task.status === "paused") task.status = "scheduled";
-      else return sendJson(res, 409, { error: "This task action is not valid for the current state." });      task.updatedAt = new Date().toISOString(); writeDb(db); return sendJson(res, 200, { task: publicAssistantTask(task) });
+      else return sendJson(res, 409, { error: "This task action is not valid for the current state." });
+      task.updatedAt = new Date().toISOString(); writeDb(db); return sendJson(res, 200, { task: publicAssistantTask(task) });
     }
     if (req.method === "GET" && pathname === "/api/feishu/oauth/config") {
       const db = readDb();
@@ -3188,52 +3007,6 @@ async function handleApiInWorkspace(req, res, pathname) {
       const state = signOauthState({ workspaceId, botId: bot.id, requestId, userOpenId: String(body.userOpenId || "").slice(0, 100), scopes, redirectUri, exp: expiresAt, nonce: crypto.randomUUID() }, oauthStateSecret(bot));
       return sendJson(res, 200, { authorizationUrl: createAuthorizationUrl({ appId: bot.appId, redirectUri, scopes, state }), redirectUri, expiresAt: new Date(expiresAt).toISOString(), scopes, botId: bot.id });
 
-    }
-    if (req.method === "GET" && pathname === "/api/openworker") {
-      const db = readDb(); const settings = openWorkerSettings(db); const client = new OpenWorkerClient(settings);
-      const settled = await Promise.allSettled([client.health(), client.agents(), client.personas(), client.skills(settings.defaultWorkspace), client.sessions(settings.defaultWorkspace)]);
-      const value = (index, fallback) => settled[index].status === "fulfilled" ? settled[index].value : fallback;
-      return sendJson(res, 200, {
-        settings: publicOpenWorkerSettings(db.settings?.openWorker || {}, maskSecret),
-        ready: settled[0].status === "fulfilled",
-        health: value(0, { status: "offline", error: settled[0].reason?.message || "OpenWorker unavailable" }),
-        agents: value(1, { agents: [] }).agents || [], personas: value(2, { personas: [] }).personas || [],
-        skills: value(3, { skills: [] }).skills || [], sessions: value(4, { sessions: [] }).sessions || []
-      });
-    }
-    if (req.method === "POST" && pathname === "/api/openworker") {
-      const body = await readBody(req); const db = readDb(); const existing = normalizeOpenWorkerSettings(db.settings?.openWorker || {});
-      db.settings.openWorker = normalizeOpenWorkerSettings({ ...existing, ...body, apiToken: incomingSecretValue(body.apiToken, existing.apiToken) }, {});
-      writeDb(db); return sendJson(res, 200, { settings: publicOpenWorkerSettings(db.settings.openWorker, maskSecret) });
-    }
-    if (req.method === "POST" && pathname === "/api/openworker/test") {
-      const client = new OpenWorkerClient(openWorkerSettings(readDb())); const health = await client.health();
-      return sendJson(res, 200, { ok: true, health });
-    }
-    if (req.method === "POST" && pathname === "/api/openworker/sync-skills") {
-      const db = readDb(); const client = new OpenWorkerClient(openWorkerSettings(db)); const results = [];
-      for (const workflow of (db.workflows || []).filter((item) => item.enabled !== false)) {
-        try { results.push({ id: workflow.id, ok: true, result: await client.syncSkill(workflow, openWorkerSettings(db).defaultWorkspace) }); }
-        catch (error) { results.push({ id: workflow.id, ok: false, error: String(error.message || error) }); }
-      }
-      return sendJson(res, 200, { ok: results.every((item) => item.ok), results });
-    }
-    if (req.method === "GET" && pathname === "/api/openworker/sessions") {
-      const db = readDb(); const client = new OpenWorkerClient(openWorkerSettings(db)); return sendJson(res, 200, await client.sessions(openWorkerSettings(db).defaultWorkspace));
-    }
-    const openWorkerMessagesMatch = pathname.match(/^\/api\/openworker\/sessions\/([A-Za-z0-9_-]{1,100})\/messages$/);
-    if (req.method === "GET" && openWorkerMessagesMatch) {
-      const client = new OpenWorkerClient(openWorkerSettings(readDb())); return sendJson(res, 200, await client.messages(openWorkerMessagesMatch[1]));
-    }
-    if (req.method === "POST" && pathname === "/api/openworker/run") {
-      const body = await readBody(req); const db = readDb(); const prompt = String(body.prompt || "").trim(); if (!prompt) throw new Error("Prompt is required.");
-      const agent = db.agents.find((item) => item.id === body.agentId) || db.agents[0]; const settings = openWorkerSettings(db); const binding = openWorkerBinding(agent, settings);
-      const task = createOpenWorkerTask({ goal: openWorkerIdentityPrompt(agent, prompt), title: prompt, workspaceId: activeWorkspaceId() || LEGACY_OWNER_ID, agentId: agent?.id || "", workerAgent: body.workerAgent || binding.workerAgent, mode: body.mode || binding.mode, workspace: body.workspace || binding.workspace, model: body.model || binding.model, sessionId: body.sessionId || "" });
-      assistantTaskEntries(db).push(task); persistOpenWorkerTask(db, task);
-      const workspaceId = activeWorkspaceId();
-      const runTask = async () => { const latestDb = readDb(); const saved = openWorkerTaskEntries(latestDb).find((item) => item.id === task.id); if (saved) await executeOpenWorkerAssistantTask(latestDb, saved); };
-      setImmediate(() => workspaceId ? workspaceContext.run({ workspaceId }, runTask) : runTask());
-      return sendJson(res, 202, { task: publicOpenWorkerTask(task) });
     }
     if (req.method === "GET" && pathname === "/api/runtime") {
       const db = readDb();

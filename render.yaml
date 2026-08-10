@@ -1,10 +1,10 @@
 services:
   - type: web
     name: tona-agent-studio
-    runtime: docker
+    runtime: node
     plan: starter
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    buildCommand: npm install
+    startCommand: npm start
     healthCheckPath: /gateway/health
     envVars:
       - key: NODE_ENV
@@ -19,18 +19,6 @@ services:
         value: admin@team.local
       - key: TONA_RESEARCH_STUDIO_URL
         value: https://tona-research-studio.fucx9501.chatgpt.site
-      - key: OPENWORKER_MODE
-        value: embedded
-      - key: OPENWORKER_ENABLED
-        value: "true"
-      - key: OPENWORKER_API_TOKEN
-        generateValue: true
-      - key: OPENWORKER_DEFAULT_MODE
-        value: interactive
-      - key: OPENWORKER_STATE_DIR
-        value: /var/data/openworker/state
-      - key: OPENWORKER_WORKSPACE
-        value: /var/data/openworker/workspace
       - key: TONA_OAUTH_STATE_KEY
         sync: false
       - key: TONA_EXECUTOR_URL

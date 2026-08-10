@@ -1,4 +1,4 @@
-node_modules/
+﻿node_modules/
 cloudflared*.log
 *.log
 .env
@@ -11,4 +11,3 @@ data/teamflow/
 data/workspaces/
 data/model-usage.jsonl
 data/*.log
-.openworker/
