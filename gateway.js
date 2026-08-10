@@ -43,9 +43,26 @@ function startOpenWorker() {
   if (!OPENWORKER_ENABLED || OPENWORKER_MODE === 'remote' || shuttingDown) return;
   fs.mkdirSync(OPENWORKER_STATE_DIR, { recursive: true });
   fs.mkdirSync(OPENWORKER_WORKSPACE, { recursive: true });
-  const command = process.env.OPENWORKER_EXECUTABLE || 'openworker-server';
-  const args = ['--cwd', OPENWORKER_WORKSPACE, '--host', '127.0.0.1', '--port', String(OPENWORKER_PORT), '--mode', process.env.OPENWORKER_DEFAULT_MODE || 'interactive'];
-  const env = { ...process.env, COWORKER_API_TOKEN: OPENWORKER_API_TOKEN, COWORKER_STATE_DIR: OPENWORKER_STATE_DIR };
+  const bundledModule = path.join(ROOT, '.openworker', 'coworker', 'server', 'run.py');
+  const dockerExecutable = '/opt/openworker/bin/openworker-server';
+  const useBundledModule = !process.env.OPENWORKER_EXECUTABLE && fs.existsSync(bundledModule);
+  const command = process.env.OPENWORKER_EXECUTABLE
+    || (useBundledModule ? (process.env.OPENWORKER_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')) : '')
+    || (fs.existsSync(dockerExecutable) ? dockerExecutable : '')
+    || 'openworker-server';
+  const args = [
+    ...(useBundledModule ? ['-m', 'coworker.server.run'] : []),
+    '--cwd', OPENWORKER_WORKSPACE,
+    '--host', '127.0.0.1',
+    '--port', String(OPENWORKER_PORT),
+    '--mode', process.env.OPENWORKER_DEFAULT_MODE || 'interactive'
+  ];
+  const env = {
+    ...process.env,
+    COWORKER_API_TOKEN: OPENWORKER_API_TOKEN,
+    COWORKER_STATE_DIR: OPENWORKER_STATE_DIR,
+    ...(useBundledModule ? { PYTHONPATH: [path.join(ROOT, '.openworker'), process.env.PYTHONPATH || ''].filter(Boolean).join(path.delimiter) } : {})
+  };
   const child = spawn(command, args, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   children.set('openworker', child);
   child.stdout.on('data', chunk => process.stdout.write(`[openworker] ${chunk}`));

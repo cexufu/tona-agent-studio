@@ -18,6 +18,9 @@ OpenWorker Server (Python, loopback or remote)
 
 生产环境默认使用 `embedded`：同一个 Render Docker 服务启动 OpenWorker，并只监听 `127.0.0.1:7360`。TONA 对外暴露经过鉴权和权限收敛的 Studio API，不把 OpenWorker 原始端口暴露到公网。
 
+对于历史上已经创建为 Render Node Runtime、尚未由 Blueprint 管理的服务，
+pm install 会在 Render 构建阶段把同一固定版本安装到项目内 .openworker Python 环境；Gateway 会优先发现这个可执行文件。这样无需因为 Runtime 类型不能被普通 Git 部署修改而导致 spawn openworker-server ENOENT。新建服务仍推荐 Docker/Blueprint。
+
 也可以使用 `remote`，把 TONA 接到用户已有的 OpenWorker 服务。远程地址必须使用 HTTP(S)，凭证通过 `X-OpenWorker-Token` 和 WebSocket 子协议传递，页面只返回掩码。
 
 ## 映射规则
