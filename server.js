@@ -29,6 +29,7 @@ const {
   runPaovrd,
   approvePendingAction,
   rejectPendingAction,
+  resumeLimitedRun,
   resumeWithUserInput,
   compactText
 } = require("./runtime/agent-runtime-v3");
@@ -405,6 +406,10 @@ function runtimeExecutionContext(db, toolId, options = {}) {
     workspaceId,
     authorizedWorkspaceId: workspaceId,
     idempotencyKey: String(options.idempotencyKey || "").slice(0, 120),
+    traceId: String(options.traceId || "").slice(0, 120),
+    parentInvocationId: String(options.parentInvocationId || "").slice(0, 120),
+    runId: String(options.runId || "").slice(0, 120),
+    stepId: String(options.stepId || "").slice(0, 160),
     allowedRisks: ["read", "write", "execute"],
     confirmed: options.confirmed === true,
     policyDecision,
@@ -2138,8 +2143,12 @@ function paovrdDependencies(db, bot, options = {}) {
       input,
       taskId: execution.task.id,
       confirmed: execution.risk !== "read",
-      idempotencyKey: "paovrd:" + execution.task.id + ":" + (execution.task.metrics.steps + 1) + ":" + toolId,
-      audit: { feature: "paovrd", taskId: execution.task.id, agentId: agent.id }
+      traceId: execution.traceId,
+      parentInvocationId: execution.parentInvocationId,
+      runId: execution.runId,
+      stepId: execution.stepId,
+      idempotencyKey: execution.runId + ":" + execution.stepId + ":" + toolId,
+      audit: { feature: "paovrd", taskId: execution.task.id, runId: execution.runId, stepId: execution.stepId, agentId: agent.id }
     })),
     delegate: callableAgents.length ? async (action, execution) => {
       const child = callableAgents.find((item) => item.id === action.agentId);
@@ -2290,8 +2299,11 @@ function publicPaovrdTask(task) {
     id: task.id, type: task.type, runtimeVersion: task.runtimeVersion, status: task.status, phase: task.phase,
     goal: task.goal, agentId: task.agentId, createdAt: task.createdAt, updatedAt: task.updatedAt,
     metrics: task.metrics, verification: task.verification,
+    run: task.run ? { runId: task.run.runId, traceId: task.run.traceId, attempt: task.run.attempt, startedAt: task.run.startedAt, resumedAt: task.run.resumedAt, completedAt: task.run.completedAt, stoppedAt: task.run.stoppedAt, stopReason: task.run.stopReason } : null,
+    checkpoint: task.checkpoint ? { runId: task.checkpoint.runId, status: task.checkpoint.status, stoppedAt: task.checkpoint.stoppedAt, reason: task.checkpoint.reason, completed: (task.checkpoint.completed || []).map((item) => ({ stepId: item.stepId, toolId: item.toolId, invocationId: item.invocationId, artifactIds: item.artifactIds || [] })), remaining: task.checkpoint.remaining, resume: task.checkpoint.resume } : null,
+    steps: (task.steps || []).map((step) => ({ index: step.index, stepId: step.stepId || "", toolId: step.toolId, status: step.status, startedAt: step.startedAt, completedAt: step.completedAt, receipt: step.receipt || null, error: step.error || null })),
     pendingAction: task.pendingAction ? { toolName: task.pendingAction.toolName, risk: task.pendingAction.risk, rationale: task.pendingAction.action?.rationale || "" } : null,
-    trace: (task.trace || []).map((event) => ({ at: event.at, phase: event.phase, status: event.status, toolId: event.toolId || "", error: event.error || "" }))
+    trace: (task.trace || []).map((event) => ({ at: event.at, phase: event.phase, status: event.status, runId: event.runId || task.run?.runId || "", stepId: event.stepId || "", traceId: event.traceId || task.run?.traceId || "", toolId: event.toolId || "", invocationId: event.invocationId || "", error: event.error || "" }))
   };
 }
 function wantsCalendarAction(text) { return /(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u52a0\u5165|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88).{0,12}(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386)|(?:\u4f1a\u8bae|\u65e5\u7a0b|\u65e5\u5386).{0,12}(?:\u5b89\u6392|\u9884\u7ea6|\u521b\u5efa|\u4fee\u6539|\u6539\u671f|\u53d6\u6d88)/u.test(String(text || '')); }
@@ -2966,6 +2978,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       const body = await readBody(req); const db = readDb(); const task = assistantTaskEntries(db).find((item) => item.id === assistantTaskActionMatch[1]);
       if (!task) return sendJson(res, 404, { error: "Task not found." });
       const action = String(body.action || ""); const terminal = ["completed", "completed_with_limits", "sent", "failed", "cancelled", "rejected", "resume_failed"].includes(task.status);
+      if (action === "continue" && task.type === "paovrd" && ["completed_with_limits", "failed"].includes(task.status) && resumeLimitedRun(task)) { writeDb(db); schedulePaovrdResume(activeWorkspaceId() || LEGACY_OWNER_ID, task.id); return sendJson(res, 202, { task: publicAssistantTask(task) }); }
       if (action === "cancel" && !terminal) { task.status = "cancelled"; task.pendingAction = null; for (const child of assistantTaskEntries(db).filter((item) => item.parentTaskId === task.id && !["completed","failed","cancelled","timed_out","refused"].includes(item.status))) { child.status = "cancelled"; child.updatedAt = new Date().toISOString(); } }
       else if (action === "pause" && task.type === "scheduled_reminder" && task.status === "scheduled") task.status = "paused";
       else if (action === "resume" && task.type === "scheduled_reminder" && task.status === "paused") task.status = "scheduled";

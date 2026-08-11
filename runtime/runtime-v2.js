@@ -40,6 +40,8 @@ function classifyToolError(error) {
   if (/abort|timeout|timed out/i.test(message)) return new RuntimeToolError("TOOL_TIMEOUT", message, { category: "timeout", retryable: true, status: 504 });
   if (/429|rate.?limit|too many requests/i.test(message)) return new RuntimeToolError("TOOL_PROVIDER_RATE_LIMIT", message, { category: "rate_limit", retryable: true, status: 429 });
   if (/HTTP 5\d\d/i.test(message)) return new RuntimeToolError("TOOL_PROVIDER_UNAVAILABLE", message, { category: "provider", retryable: true, status: 502 });
+  if (/ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|socket hang up/i.test(message)) return new RuntimeToolError("TOOL_NETWORK_ERROR", message, { category: "network", retryable: true, status: 502 });
+  if (/401|403|unauthori[sz]ed|forbidden|permission denied/i.test(message)) return new RuntimeToolError("TOOL_PERMISSION_DENIED", message, { category: "permission", retryable: false, status: 403 });
   return new RuntimeToolError("TOOL_EXECUTION_FAILED", message, { category: "execution", retryable: false, status: 422 });
 }
 
@@ -177,6 +179,7 @@ async function executeRegisteredTool(registry, toolId, input, context = {}) {
     } catch (error) {
       clearTimeout(timer);
       lastError = classifyToolError(error);
+      context.audit?.({ at: new Date(Number(context.now?.() ?? Date.now())).toISOString(), invocationId, traceId, parentInvocationId, workspaceId, toolId, pluginId: definition.plugin?.id || "", risk: definition.risk, status: lastError.retryable && attempts <= definition.policy.retries ? "retrying" : "attempt_failed", attempt: attempts, error: { code: lastError.code, category: lastError.category, message: lastError.message, retryable: lastError.retryable } });
       if (!lastError.retryable || attempts > definition.policy.retries) break;
     }
   }

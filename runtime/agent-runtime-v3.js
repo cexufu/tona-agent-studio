@@ -1,6 +1,7 @@
 const crypto = require("crypto");
+const { beginOrResumeRun, ensureRun, nextStepId, checkpointRun, completeRun } = require("./agent-run-receipt");
 
-const RUNTIME_VERSION = "3.0";
+const RUNTIME_VERSION = "3.1";
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_limits", "failed", "cancelled"]);
 const DEFAULT_BUDGET = Object.freeze({ maxSteps: 8, maxToolCalls: 6, maxModelCalls: 10, maxReplans: 2, maxSubagents: 4, maxDurationMs: 120000 });
 
@@ -190,6 +191,8 @@ async function deliver(task, deps, limited = false) {
     task.finalAnswer = safeFallbackAnswer(task, limited) + `\n\n交付模型异常：${String(error.message || error).slice(0, 240)}`;
   }
   task.status = limited ? "completed_with_limits" : "completed";
+  if (limited) checkpointRun(task, task.status, "runtime_budget_reached");
+  else completeRun(task);
   taskEvent(task, "deliver", { status: task.status }); deps.persist?.(task);
   return { status: task.status, task, message: task.finalAnswer };
 }
@@ -200,6 +203,7 @@ async function runPaovrd(task, deps) {
   const tools = executableTools(deps.tools || []);
   const agents = Array.isArray(deps.agents) ? deps.agents : [];
   const startedAt = Date.now();
+  const run = beginOrResumeRun(task);
   task.status = "running";
   try {
     if (!task.plan) {
@@ -217,6 +221,7 @@ async function runPaovrd(task, deps) {
       }
       if (action.type === "ask_user") {
         task.status = "waiting_input"; task.pendingQuestion = action.question;
+        checkpointRun(task, task.status, "required_user_input");
         taskEvent(task, "replan", { status: "waiting_input", rationale: action.rationale }); deps.persist?.(task);
         return { status: task.status, task, message: action.question };
       }
@@ -226,6 +231,7 @@ async function runPaovrd(task, deps) {
         if (task.verification.passed || task.verification.next === "deliver") return deliver(task, deps, false);
         if (task.verification.next === "ask_user") {
           task.status = "waiting_input"; task.pendingQuestion = task.verification.question || "请补充完成任务所需的信息。";
+          checkpointRun(task, task.status, "verification_requires_user_input");
           deps.persist?.(task); return { status: task.status, task, message: task.pendingQuestion };
         }
         if (task.metrics.replans >= task.budget.maxReplans) return deliver(task, deps, true);
@@ -251,12 +257,12 @@ async function runPaovrd(task, deps) {
       }      const fingerprint = actionFingerprint(action);
       const sameAttempts = task.steps.slice(-4).filter((step) => step.fingerprint === fingerprint);
       const failedAttempts = sameAttempts.filter((step) => step.status === "error");
-      const allowOneRecoveryRetry = sameAttempts.at(-1)?.status === "error" && failedAttempts.length < 2;
+      const allowOneRecoveryRetry = sameAttempts.at(-1)?.status === "error" && sameAttempts.at(-1)?.retryable === true && failedAttempts.length < 2;
       if (sameAttempts.length && !allowOneRecoveryRetry) {
         task.metrics.noProgress += 1;
         task.observations.push({ step: task.metrics.steps, toolId: action.toolId, status: "blocked_duplicate", error: "The same tool call produced no new evidence. Replan or use a different input.", at: nowIso() });
         if (task.metrics.noProgress >= 4) {
-          task.status = "waiting_input"; task.pendingQuestion = "任务经过多次重试和调整仍没有取得新进展。请补充关键输入，或允许我调整目标与方法。"; deps.persist?.(task);
+          task.status = "waiting_input"; task.pendingQuestion = "任务经过多次重试和调整仍没有取得新进展。请补充关键输入，或允许我调整目标与方法。"; checkpointRun(task, task.status, "no_progress"); deps.persist?.(task);
           return { status: task.status, task, message: task.pendingQuestion };
         }
         continue;
@@ -264,20 +270,24 @@ async function runPaovrd(task, deps) {
       if (toolRequiresConfirmation(action.tool) && !task.approvedFingerprints.includes(fingerprint)) {
         task.status = "waiting_confirmation";
         task.pendingAction = { fingerprint, approved: false, action: { type: "tool", toolId: action.toolId, input: action.input, rationale: action.rationale }, risk: action.tool.risk, toolName: action.tool.name || action.toolId };
+        checkpointRun(task, task.status, "tool_confirmation_required");
         taskEvent(task, "act", { status: "waiting_confirmation", toolId: action.toolId, risk: action.tool.risk }); deps.persist?.(task);
         return { status: task.status, task, pendingAction: task.pendingAction };
       }
       task.metrics.steps += 1; task.metrics.toolCalls += 1;
-      taskEvent(task, "act", { status: "executing", toolId: action.toolId, rationale: action.rationale }); deps.persist?.(task);
-      const step = { index: task.metrics.steps, toolId: action.toolId, input: action.input, fingerprint, risk: action.tool.risk, rationale: action.rationale, startedAt: nowIso() };
+      const stepId = nextStepId(task, task.metrics.steps);
+      taskEvent(task, "act", { status: "executing", toolId: action.toolId, stepId, runId: run.runId, traceId: run.traceId, rationale: action.rationale }); deps.persist?.(task);
+      const step = { index: task.metrics.steps, stepId, runId: run.runId, traceId: run.traceId, toolId: action.toolId, input: action.input, fingerprint, risk: action.tool.risk, rationale: action.rationale, startedAt: nowIso() };
       let observation;
       try {
-        const execution = await deps.executeTool(action.toolId, action.input, { task, risk: action.tool.risk });
-        observation = { step: step.index, toolId: action.toolId, status: "success", invocationId: execution?.invocationId || "", artifactIds: execution?.artifactIds || [], data: compactText(execution?.data ?? execution, 6000), at: nowIso() };
-        step.status = "success";
+        const execution = await deps.executeTool(action.toolId, action.input, { task, risk: action.tool.risk, runId: run.runId, stepId, traceId: run.traceId, parentInvocationId: task.parentInvocationId || "" });
+        const receipt = { attempts: execution?.meta?.attempts || 1, durationMs: execution?.meta?.durationMs || 0, cached: execution?.meta?.cached === true, quality: execution?.quality || [], artifactIds: execution?.artifactIds || [] };
+        observation = { step: step.index, stepId, runId: run.runId, traceId: execution?.traceId || run.traceId, toolId: action.toolId, status: "success", invocationId: execution?.invocationId || "", artifactIds: execution?.artifactIds || [], quality: execution?.quality || [], receipt, data: compactText(execution?.data ?? execution, 6000), at: nowIso() };
+        step.receipt = receipt; step.status = "success";
       } catch (error) {
-        observation = { step: step.index, toolId: action.toolId, status: "error", error: String(error?.message || error).slice(0, 1000), code: String(error?.code || "TOOL_ERROR"), at: nowIso() };
-        step.status = "error";
+        const retryable = error?.retryable === true;
+        observation = { step: step.index, stepId, runId: run.runId, traceId: error?.traceId || run.traceId, toolId: action.toolId, status: "error", invocationId: error?.invocationId || "", error: String(error?.message || error).slice(0, 1000), code: String(error?.code || "TOOL_ERROR"), category: String(error?.category || "execution"), retryable, at: nowIso() };
+        step.status = "error"; step.retryable = retryable; step.error = { code: observation.code, category: observation.category, message: observation.error };
       }
       step.completedAt = nowIso(); task.steps.push(step); task.observations.push(observation);
       task.steps = task.steps.slice(-20); task.observations = task.observations.slice(-20);
@@ -291,6 +301,7 @@ async function runPaovrd(task, deps) {
   } catch (error) {
     if (error.code === "PAOVRD_BUDGET") return deliver(task, deps, true);
     task.status = "failed"; task.error = String(error?.message || error).slice(0, 1000);
+    checkpointRun(task, task.status, task.error);
     taskEvent(task, task.phase || "failed", { status: "failed", error: task.error }); deps.persist?.(task);
     return { status: task.status, task, message: `任务执行失败：${task.error}` };
   }
@@ -302,12 +313,23 @@ function approvePendingAction(task) {
 }
 function rejectPendingAction(task, reason = "用户取消了待执行动作。") {
   if (!task?.pendingAction || task.status !== "waiting_confirmation") return false;
-  task.status = "cancelled"; task.error = reason; task.pendingAction = null; taskEvent(task, "act", { status: "cancelled" }); return true;
+  task.status = "cancelled"; task.error = reason; task.pendingAction = null; checkpointRun(task, task.status, reason); taskEvent(task, "act", { status: "cancelled" }); return true;
 }
+function resumeLimitedRun(task, extraBudget = {}) {
+  if (!task || !["completed_with_limits", "failed"].includes(task.status)) return false;
+  const wasLimited = task.status === "completed_with_limits";
+  const additions = { maxSteps: 8, maxToolCalls: 6, maxModelCalls: 10, maxReplans: 2, maxSubagents: 4 };
+  if (wasLimited) for (const [key, fallback] of Object.entries(additions)) task.budget[key] = Math.max(0, Number(task.budget[key]) || 0) + Math.max(1, Number(extraBudget[key]) || fallback);
+  const run = ensureRun(task); run.completedAt = "";
+  task.status = "running"; task.error = ""; task.verification = null; task.phase = "replan"; task.updatedAt = nowIso();
+  beginOrResumeRun(task); taskEvent(task, "replan", { status: "resumed_after_limits", attempt: task.run.attempt });
+  return true;
+}
+
 function resumeWithUserInput(task, text) {
   if (!task || task.status !== "waiting_input") return false;
   task.userInputs.push({ at: nowIso(), text: String(text || "").slice(0, 3000) }); task.userInputs = task.userInputs.slice(-10);
-  task.pendingQuestion = ""; task.status = "running"; task.phase = "replan"; task.updatedAt = nowIso(); return true;
+  task.pendingQuestion = ""; task.status = "running"; task.phase = "replan"; task.updatedAt = nowIso(); beginOrResumeRun(task); return true;
 }
 
-module.exports = { RUNTIME_VERSION, DEFAULT_BUDGET, createPaovrdTask, shouldUsePaovrd, executableTools, runPaovrd, approvePendingAction, rejectPendingAction, resumeWithUserInput, compactText };
+module.exports = { RUNTIME_VERSION, DEFAULT_BUDGET, createPaovrdTask, shouldUsePaovrd, executableTools, runPaovrd, approvePendingAction, rejectPendingAction, resumeLimitedRun, resumeWithUserInput, compactText };
