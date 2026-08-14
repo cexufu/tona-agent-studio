@@ -13,10 +13,10 @@ assert.deepEqual(duplicates, [], `Duplicate HTML ids: ${duplicates.join(", ")}`)
 
 for (const id of [
   "view-agents", "agentRosterCount", "agentForm", "agentSkillBindings", "agentToolBindings",
-  "agentChannelStatus", "agentChannelAppId", "agentUsagePanel", "view-tasks", "assistantTaskList"
+  "agentChannelStatus", "agentChannelAppId", "agentUsagePanel", "view-tasks", "assistantTaskList", "activationProgress"
 ]) assert(ids.includes(id), `Missing P0/P1 UI element: ${id}`);
 
-for (const label of ["问剑台", "布阵台", "内功堂", "群侠谱", "武学阁", "神兵坊", "藏经阁", "飞鸽驿", "江湖令", "行迹录"]) {
+for (const label of ["概览", "运行工作台", "Agents", "Skills", "模型", "工具与连接", "文件与知识", "飞书", "任务", "运行记录"]) {
   assert(html.includes(label), `Missing navigation label: ${label}`);
 }
 assert(app.includes("data.skillBindings"));

@@ -3,7 +3,7 @@ services:
     name: tona-agent-studio
     runtime: node
     plan: starter
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /gateway/health
     envVars:
@@ -15,6 +15,16 @@ services:
         value: /var/data/teamflow
       - key: TEAMFLOW_INITIAL_ADMIN_PASSWORD
         sync: false
+      - key: TONA_SECRETS_KEY
+        sync: false
+      - key: TONA_REGISTRATION_MODE
+        value: invite
+      - key: TONA_REGISTRATION_INVITE_CODE
+        sync: false
+      - key: TONA_EVENT_LOG_RETENTION_DAYS
+        value: 14
+      - key: TONA_EVENT_LOG_MAX_FILES
+        value: 1000
       - key: TONA_RESEARCH_OWNER_EMAIL
         value: admin@team.local
       - key: TONA_RESEARCH_STUDIO_URL

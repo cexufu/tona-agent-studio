@@ -1,4 +1,4 @@
-﻿# TONA + TeamFlow 单实例部署
+# TONA + TeamFlow 单实例部署
 
 该仓库现在通过一个网关在同一个 Render Web Service 中运行两个独立产品：
 
@@ -17,10 +17,25 @@
 ```text
 DATA_DIR=/var/data
 TEAMFLOW_DATA_DIR=/var/data/teamflow
-TEAMFLOW_INITIAL_ADMIN_PASSWORD=设置一个安全密码
+TEAMFLOW_INITIAL_ADMIN_PASSWORD=至少 12 位的管理员密码
+TONA_SECRETS_KEY=至少 24 位的随机密钥
+TONA_REGISTRATION_MODE=invite
+TONA_REGISTRATION_INVITE_CODE=至少 12 位的邀请码
+TONA_EVENT_LOG_RETENTION_DAYS=14
+TONA_EVENT_LOG_MAX_FILES=1000
 REMINDER_TIMEZONE=Asia/Shanghai
 REMINDER_HOUR=9
 ```
+
+> 生产环境会在启动时校验管理员密码、密钥和邀请配置；缺失或过弱时服务会拒绝启动。
+
+健康检查分为：
+
+- `/api/live`：进程存活。
+
+- `/api/ready`：数据目录可写且生产密钥已配置。
+
+- `/gateway/health`：网关与两个子服务的组合就绪状态。
 
 飞书提醒可选配置：
 

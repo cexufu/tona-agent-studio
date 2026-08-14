@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { handleFeatureApi } = require('./feature-api');
 const { createReminderEngine } = require('./reminder-engine');
+const { SessionStore } = require('./session-store');
+const { registrationMode, securityHeaders, clientAddress, createRateLimiter, probeWritableDirectory } = require('../runtime/production-guardrails');
 
 const PORT = Number(process.env.PORT || 7360);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -12,7 +14,12 @@ const DB_FILE = path.join(DATA_DIR, 'teamflow.json');
 const TEAMS_DIR = path.join(DATA_DIR, 'teams');
 const teamContext = new AsyncLocalStorage();
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const sessions = new Map();
+const sessions = new SessionStore(path.join(DATA_DIR, 'sessions.json'));
+const loginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 8 });
+const registerLimiter = createRateLimiter({ windowMs: 60 * 60_000, max: 5 });
+const REGISTRATION_MODE = registrationMode(process.env);
+const responseSecurityHeaders = securityHeaders(process.env);
+if (process.env.NODE_ENV === 'production' && String(process.env.INITIAL_ADMIN_PASSWORD || '').length < 12) throw new Error('INITIAL_ADMIN_PASSWORD must be at least 12 characters in production.');
 
 const ROLE_PERMISSIONS = {
   owner: ['team.manage', 'settings.manage', 'requirement.manage', 'task.manage', 'comment.create'],
@@ -38,28 +45,17 @@ function verifyPassword(password, stored) {
 }
 
 function seedDatabase() {
-  const adminPassword = process.env.INITIAL_ADMIN_PASSWORD || 'teamflow123';
+  const adminPassword = process.env.INITIAL_ADMIN_PASSWORD || crypto.randomBytes(18).toString('base64url');
   const ownerId = 'usr_owner';
-  const productId = 'usr_product';
-  const devId = 'usr_dev';
   return {
     meta: { version: 1, createdAt: now() },
     settings: { teamName: '我们的小团队', reminderDays: 2 },
     users: [
       { id: ownerId, name: '林岚', email: 'admin@team.local', role: 'owner', title: '负责人', status: 'active', passwordHash: hashPassword(adminPassword), createdAt: now() },
-      { id: productId, name: '陈默', email: 'product@team.local', role: 'admin', title: '产品经理', status: 'active', passwordHash: hashPassword('product123'), createdAt: now() },
-      { id: devId, name: '周野', email: 'dev@team.local', role: 'member', title: '研发', status: 'active', passwordHash: hashPassword('dev12345'), createdAt: now() }
     ],
-    requirements: [
-      { id: 'req_demo', title: '上线团队内部需求管理工具', summary: '统一需求提出、评审、拆解、排期和跟进，减少信息散落。', type: 'feature', priority: 'P0', status: 'in_progress', ownerId: productId, proposerId: ownerId, targetDate: futureDate(12), progress: 45, createdAt: now(), updatedAt: now() }
-    ],
-    tasks: [
-      { id: 'task_demo_1', requirementId: 'req_demo', title: '确定权限角色与操作边界', description: '确认负责人、管理员、成员和只读成员权限。', status: 'done', priority: 'P0', assigneeId: productId, dueDate: futureDate(-1), estimate: 4, createdBy: ownerId, createdAt: now(), updatedAt: now() },
-      { id: 'task_demo_2', requirementId: 'req_demo', title: '完成需求看板与提醒列表', description: '交付可用的内部版本。', status: 'in_progress', priority: 'P0', assigneeId: devId, dueDate: futureDate(3), estimate: 12, createdBy: ownerId, createdAt: now(), updatedAt: now() }
-    ],
-    milestones: [
-      { id: 'mile_demo', requirementId: 'req_demo', title: '内部试用', dueDate: futureDate(7), status: 'pending', createdAt: now() }
-    ],
+    requirements: [],
+    tasks: [],
+    milestones: [],
     comments: [],
     activities: [{ id: id('act'), actorId: ownerId, action: '创建了示例需求', targetType: 'requirement', targetId: 'req_demo', createdAt: now() }]
   };
@@ -141,7 +137,7 @@ applyOneTimeAdminReset();
 const reminderEngine = createReminderEngine({ getDb: () => db, saveDb });
 
 function json(res, status, body, headers = {}) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
+  res.writeHead(status, { ...responseSecurityHeaders, 'Content-Type': 'application/json; charset=utf-8', ...headers });
   res.end(JSON.stringify(body));
 }
 
@@ -232,8 +228,15 @@ function decomposeRequirement(requirement, actorId) {
 }
 
 async function api(req, res, pathname) {
-  if (pathname === '/api/health') return json(res, 200, { ok: true, service: 'teamflow-lite', dataWritable: fs.existsSync(DATA_DIR), reminder: reminderEngine.status() });
+  if (pathname === '/api/health') {
+    const dataWritable = probeWritableDirectory(DATA_DIR);
+    return json(res, dataWritable ? 200 : 503, { ok: dataWritable, service: 'teamflow-lite', dataWritable, reminder: reminderEngine.status() });
+  }
+  if (pathname === '/api/registration-config') return json(res, 200, { mode: REGISTRATION_MODE, canRegister: REGISTRATION_MODE !== 'closed', inviteRequired: REGISTRATION_MODE === 'invite' });
   if (pathname === '/api/login' && req.method === 'POST') {
+    const address = clientAddress(req);
+    const limit = loginLimiter.consume(address);
+    if (!limit.allowed) return json(res, 429, { error: 'Too many login attempts. Try again later.' }, { 'Retry-After': String(limit.retryAfter) });
     const body = await readBody(req);
     const account = registry.users.find(item => item.email.toLowerCase() === clean(body.email).toLowerCase());
     if (!account || account.status !== 'active' || !verifyPassword(String(body.password || ''), account.passwordHash)) return json(res, 401, { error: '邮箱或密码不正确' });
@@ -242,11 +245,22 @@ async function api(req, res, pathname) {
     if (!teamId) return json(res, 403, { error: 'No TeamFlow workspace is assigned to this account.' });
     const user = loadTeamDb(teamId).users.find(item => item.id === account.id);
     sessions.set(token, { userId: account.id, teamId, expiresAt: Date.now() + 7 * 86400000 });
+    loginLimiter.clear(address);
     return json(res, 200, { user: publicUser(user) }, { 'Set-Cookie': `teamflow_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` });
   }
   if (pathname === '/api/register' && req.method === 'POST') {
+    if (REGISTRATION_MODE === 'closed') return json(res, 403, { error: 'Registration is currently closed.' });
+    const address = clientAddress(req);
+    const limit = registerLimiter.consume(address);
+    if (!limit.allowed) return json(res, 429, { error: 'Too many registration attempts. Try again later.' }, { 'Retry-After': String(limit.retryAfter) });
     const body = await readBody(req); const email = clean(body.email).toLowerCase(); const password = String(body.password || ''); const name = clean(body.name);
-    if (!name || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) return json(res, 400, { error: 'Name, email, and an 8-character password are required.' });
+    if (REGISTRATION_MODE === 'invite') {
+      const expected = String(process.env.TONA_REGISTRATION_INVITE_CODE || '');
+      const supplied = String(body.inviteCode || '');
+      if (!expected || expected.length !== supplied.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(supplied))) return json(res, 403, { error: 'A valid invitation code is required.' });
+    }
+    const minimumPasswordLength = process.env.NODE_ENV === 'production' ? 12 : 8;
+    if (!name || !/^\S+@\S+\.\S+$/.test(email) || password.length < minimumPasswordLength) return json(res, 400, { error: 'Name, email, and a ' + minimumPasswordLength + '-character password are required.' });
     if (registry.users.some(item => item.email.toLowerCase() === email)) return json(res, 409, { error: 'This email already has an account.' });
     const user = { id: id('usr'), name, email, role: 'owner', title: clean(body.title), status: 'active', passwordHash: hashPassword(password), createdAt: now() }; const teamId = id('team');
     const team = initialTeamData({ settings: { teamName: clean(body.teamName) || (name + "'s Team"), reminderDays: 2 }, users: [user], requirements: [], tasks: [], milestones: [], comments: [], activities: [] }, teamId);
@@ -274,8 +288,8 @@ async function api(req, res, pathname) {
     const passwordHash = hashPassword(newPassword); account.passwordHash = passwordHash;
     for (const teamId of account.teamIds || []) { const team = loadTeamDb(teamId); const member = team.users.find(item => item.id === account.id); if (member) { member.passwordHash = passwordHash; atomicWrite(teamFile(teamId), team); } }
     persistRegistry();
-    const currentToken = parseCookies(req).teamflow_session;
-    for (const [token, session] of sessions) if (session.userId === user.id && token !== currentToken) sessions.delete(token);
+    const currentTokenDigest = crypto.createHash('sha256').update(parseCookies(req).teamflow_session || '').digest('hex');
+    for (const [tokenDigest, session] of sessions.entries()) if (session.userId === user.id && tokenDigest !== currentTokenDigest) sessions.deleteDigest(tokenDigest);
     return json(res, 200, { ok: true });
   }
   if (pathname === '/api/hub') {
@@ -306,13 +320,13 @@ async function api(req, res, pathname) {
       atomicWrite(teamFile(targetId), target); teamCache.set(targetId, target);
     }
     account.teamIds = Array.from(new Set([...(account.teamIds || []), targetId])); account.lastTeamId = targetId; persistRegistry();
-    const token = parseCookies(req).teamflow_session; const session = sessions.get(token); if (session) { session.teamId = targetId; session.teamAccess = true; }
+    const token = parseCookies(req).teamflow_session; const session = sessions.get(token); if (session) { session.teamId = targetId; session.teamAccess = true; sessions.update(); }
     return json(res, 200, { ok: true, team: { id: targetId, name: target.settings.teamName || 'TeamFlow Team' } });
   }
   if (pathname === '/api/hub/select-team' && req.method === 'POST') {
     const body = await readBody(req); const account = registry.users.find(item => item.id === user.id); const targetId = clean(body.teamId);
     if (!account?.teamIds?.includes(targetId)) return json(res, 403, { error: 'You do not belong to this team.' });
-    account.lastTeamId = targetId; persistRegistry(); const token = parseCookies(req).teamflow_session; const session = sessions.get(token); if (session) session.teamId = targetId;
+    account.lastTeamId = targetId; persistRegistry(); const token = parseCookies(req).teamflow_session; const session = sessions.get(token); if (session) { session.teamId = targetId; sessions.update(); }
     return json(res, 200, { ok: true });
   }
   if (pathname === '/api/dashboard') return json(res, 200, dashboard());
@@ -424,10 +438,10 @@ function serveStatic(req, res, pathname) {
   const requested = pathname === '/' ? 'index.html' : pathname.replace(/^\//, '');
   const filePath = path.resolve(PUBLIC_DIR, requested);
   if (!filePath.startsWith(path.resolve(PUBLIC_DIR)) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    res.writeHead(404); return res.end('Not found');
+    res.writeHead(404, responseSecurityHeaders); return res.end('Not found');
   }
   const types = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json; charset=utf-8' };
-  res.writeHead(200, { 'Content-Type': types[path.extname(filePath)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+  res.writeHead(200, { ...responseSecurityHeaders, 'Content-Type': types[path.extname(filePath)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
   fs.createReadStream(filePath).pipe(res);
 }
 

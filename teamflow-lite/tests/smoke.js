@@ -38,7 +38,7 @@ async function waitUntilReady() {
     if (decomposition.tasks.length !== 4) throw new Error('Expected four decomposed tasks');
     await request(`/api/tasks/${decomposition.tasks[0].id}`, { method: 'PATCH', body: JSON.stringify({ status: 'done' }) });
     const dashboard = await request('/api/dashboard');
-    if (!dashboard.stats || dashboard.stats.teamMembers !== 3) throw new Error('Dashboard stats are invalid');
+    if (!dashboard.stats || dashboard.stats.teamMembers !== 1) throw new Error('Dashboard stats are invalid');
     console.log('Smoke test passed: login, requirement, decomposition, task update, dashboard');
   } finally {
     child.kill();

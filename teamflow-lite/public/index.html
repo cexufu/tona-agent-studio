@@ -39,9 +39,9 @@
         <h2>登录团队空间</h2>
         <p class="muted">使用团队账号继续</p>
         <label>工作邮箱<input name="email" type="email" value="admin@team.local" required autocomplete="email"></label>
-        <label>密码<input name="password" type="password" value="teamflow123" required autocomplete="current-password"></label>
+        <label>密码<input name="password" type="password" required autocomplete="current-password"></label>
         <button class="btn primary wide" type="submit">进入工作台 <span>→</span></button>
-        <p class="login-hint">初始负责人账号：admin@team.local / teamflow123</p>
+        <p class="login-hint">管理员密码由部署环境配置，不会显示在页面中</p>
         <button class="link-btn" type="button" id="showRegister">&#21021;&#27425;&#20351;&#29992;&#65311;&#21019;&#24314;&#33258;&#24049;&#30340;&#31169;&#26377;&#24037;&#20316;&#21306;</button>
       </form>
       <form id="registerForm" class="login-card hidden">
@@ -51,7 +51,8 @@
         <p class="muted">&#36134;&#21495;&#12289;&#25104;&#21592;&#21644;&#39033;&#30446;&#25968;&#25454;&#20250;&#19982;&#20854;&#20182;&#29992;&#25143;&#38548;&#31163;&#12290;</p>
         <label>&#22995;&#21517;<input name="name" required autocomplete="name"></label>
         <label>&#24037;&#20316;&#37038;&#31665;<input name="email" type="email" required autocomplete="email"></label>
-        <label>&#23494;&#30721;<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+        <label>&#23494;&#30721;<input name="password" type="password" minlength="12" required autocomplete="new-password"></label>
+        <label id="inviteCodeField" class="hidden">邀请码<input name="inviteCode" autocomplete="one-time-code"></label>
         <label>&#22242;&#38431;&#21517;&#31216;<input name="teamName" placeholder="&#20363;&#22914;&#65306;&#25105;&#30340; AI &#22242;&#38431;"></label>
         <button class="btn primary wide" type="submit">&#21019;&#24314;&#24182;&#36827;&#20837; <span>&rarr;</span></button>
         <button class="link-btn" type="button" id="showLogin">&#36820;&#22238;&#30331;&#24405;</button>

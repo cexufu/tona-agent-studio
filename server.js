@@ -43,6 +43,8 @@ const { rememberHumanMessage, fiveLayerMemoryContext } = require("./runtime/memo
 const { normalizeAgentProfile, syncAgentProfiles, allowedToolIds, filterToolsForAgent, capabilityAllowed, filterCapabilityPlan, runtimeBudget } = require("./runtime/agent-profile");
 const { compileToolPolicy, normalizePolicy } = require("./runtime/policy-kernel");
 const { SubagentScheduler, a2aRequest, createBudgetPool, publicSubagentTask } = require("./runtime/subagent-runtime");
+const { securityHeaders, redactSensitive, pruneLogDirectory, probeWritableDirectory } = require("./runtime/production-guardrails");
+const { recordProductEvent, productMetrics } = require("./runtime/product-metrics");
 
 const PORT = Number(process.env.PORT || 7357);
 const ROOT = __dirname;
@@ -60,10 +62,14 @@ const TEAMFLOW_INTERNAL_PORT = Number(process.env.TEAMFLOW_INTERNAL_PORT || 7359
 const LEGACY_OWNER_ID = process.env.TONA_LEGACY_OWNER_ID || "usr_owner";
 const ERROR_LOG_PATH = path.join(DATA_DIR, "tona-server-error.log");
 const FEISHU_OPEN_API_BASE = String(process.env.FEISHU_OPEN_API_BASE || "https://open.feishu.cn/open-apis").replace(/\/+$/, "");
+const RESPONSE_SECURITY_HEADERS = securityHeaders(process.env);
+if (process.env.NODE_ENV === "production" && String(process.env.TONA_SECRETS_KEY || "").length < 24) {
+  throw new Error("TONA_SECRETS_KEY must be at least 24 characters in production.");
+}
 function logServerError(error) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    const message = error && error.stack ? error.stack : String(error);
+    const message = JSON.stringify(redactSensitive(error && error.stack ? error.stack : String(error)));
     fs.appendFileSync(ERROR_LOG_PATH, `[${new Date().toISOString()}] ${message}\n\n`);
   } catch {}
 }
@@ -345,7 +351,8 @@ function storagePaths() {
     usagePath: path.join(DATA_DIR, "model-usage.jsonl"),
     toolUsagePath: path.join(DATA_DIR, "tool-usage.jsonl"),
     filesDir: path.join(DATA_DIR, "files"),
-    memoriesDir: path.join(DATA_DIR, "memories")
+    memoriesDir: path.join(DATA_DIR, "memories"),
+    productEventsPath: path.join(DATA_DIR, "product-events.jsonl")
   };
   const directory = path.join(WORKSPACES_DIR, workspaceId);
   return {
@@ -354,8 +361,13 @@ function storagePaths() {
     usagePath: path.join(directory, "model-usage.jsonl"),
     toolUsagePath: path.join(directory, "tool-usage.jsonl"),
     filesDir: path.join(directory, "files"),
-    memoriesDir: path.join(directory, "memories")
+    memoriesDir: path.join(directory, "memories"),
+    productEventsPath: path.join(directory, "product-events.jsonl")
   };
+}
+
+function recordMetric(event, properties = {}) {
+  return recordProductEvent(storagePaths().productEventsPath, event, properties);
 }
 
 function workspaceFileStore() {
@@ -506,7 +518,18 @@ function migrateRetiredKimiModels(db) {
 }
 function readDb() {
   ensureStore();
-  const db = transformSecrets(JSON.parse(fs.readFileSync(storagePaths().dbPath, "utf8")), decryptSecretAtRest);
+  const dbPath = storagePaths().dbPath;
+  let stored;
+  try {
+    stored = JSON.parse(fs.readFileSync(dbPath, "utf8"));
+  } catch (error) {
+    const backupPath = dbPath + ".bak";
+    if (!fs.existsSync(backupPath)) throw error;
+    stored = JSON.parse(fs.readFileSync(backupPath, "utf8"));
+    fs.copyFileSync(backupPath, dbPath);
+    logServerError(Object.assign(new Error("Recovered workspace database from backup."), { cause: error.message }));
+  }
+  const db = transformSecrets(stored, decryptSecretAtRest);
   const deepSeekMigrated = migrateRetiredDeepSeekModels(db);
   const kimiMigrated = migrateRetiredKimiModels(db);
   const builtInSkillMigrated = syncBuiltInSkills(db);
@@ -519,6 +542,7 @@ function writeDb(db) {
   const dbPath = storagePaths().dbPath;
   const temporaryPath = dbPath + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
   fs.writeFileSync(temporaryPath, JSON.stringify(transformSecrets(db, encryptSecretAtRest), null, 2));
+  if (fs.existsSync(dbPath)) fs.copyFileSync(dbPath, dbPath + ".bak");
   fs.renameSync(temporaryPath, dbPath);
 }
 
@@ -768,6 +792,7 @@ function coerceBoolean(value, fallback = false) {
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
+    ...RESPONSE_SECURITY_HEADERS,
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload)
   });
@@ -776,6 +801,7 @@ function sendJson(res, status, body) {
 
 function sendText(res, status, body, contentType = "text/plain; charset=utf-8") {
   res.writeHead(status, {
+    ...RESPONSE_SECURITY_HEADERS,
     "Content-Type": contentType,
     "Cache-Control": "no-store, max-age=0"
   });
@@ -2898,13 +2924,17 @@ async function handleFeishuEvent(req, res, receivedBody = null) {
     }
     const eventLogDir = larkEventLogDir();
     fs.mkdirSync(eventLogDir, { recursive: true });
+    pruneLogDirectory(eventLogDir, {
+      retentionDays: Number(process.env.TONA_EVENT_LOG_RETENTION_DAYS) || 14,
+      maxFiles: Number(process.env.TONA_EVENT_LOG_MAX_FILES) || 1000
+    });
     logId = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14) + "_" + crypto.randomUUID().slice(0, 8);
     fs.writeFileSync(path.join(eventLogDir, logId + ".json"), JSON.stringify({
       receivedAt: new Date().toISOString(),
-      decryptError,
+      decryptError: redactSensitive(decryptError),
       botId: botConfig?.id || null,
       agentId: botConfig?.agentId || null,
-      body: decryptError ? body : eventBody
+      body: redactSensitive(decryptError ? body : eventBody)
     }, null, 2));
     sendJson(res, 200, { ok: true });
     if (!decryptError) {
@@ -2951,6 +2981,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       const db = readDb();
       const provider = applyQuickSetup(db, body);
       writeDb(db);
+      recordMetric("provider_configured", { provider_type: String(provider.type || provider.id || "custom").slice(0, 40) });
       return sendJson(res, 200, {
         provider: { ...provider, apiKey: maskKey(provider.apiKey) },
         settings: publicDb(db).settings,
@@ -2968,6 +2999,9 @@ async function handleApiInWorkspace(req, res, pathname) {
     }
     if (req.method === "GET" && pathname === "/api/model-usage") {
       return sendJson(res, 200, modelUsageSummary());
+    }
+    if (req.method === "GET" && pathname === "/api/product-metrics") {
+      return sendJson(res, 200, productMetrics(storagePaths().productEventsPath));
     }
     if (req.method === "GET" && pathname === "/api/assistant-tasks") {
       const tasks = assistantTaskEntries(readDb()).slice(-100).reverse().map(publicAssistantTask);
@@ -3088,6 +3122,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       const body = await readBody(req, MAX_FILE_BYTES * 2);
       const buffer = decodeFileContent(body);
       const file = workspaceFileStore().save({ name: body.name, mime: body.mime, buffer, source: "studio_upload", createdBy: String(body.createdBy || "studio").slice(0, 80) });
+      recordMetric("file_uploaded", { mime: String(file.mime || "unknown").slice(0, 80), size_bytes: Number(file.size) || buffer.length });
       return sendJson(res, 201, { file });
     }
     if (req.method === "POST" && pathname === "/api/files/generate") {
@@ -3116,6 +3151,7 @@ async function handleApiInWorkspace(req, res, pathname) {
     if (req.method === "GET" && fileContentMatch) {
       const value = workspaceFileStore().readBuffer(fileContentMatch[1]);
       res.writeHead(200, {
+        ...RESPONSE_SECURITY_HEADERS,
         "Content-Type": value.selected.mime, "Content-Length": value.buffer.length,
         "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(value.selected.name)}`,
         "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"
@@ -3161,6 +3197,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       migrateRetiredDeepSeekModels(db);
       migrateRetiredKimiModels(db);
       writeDb(db);
+      recordMetric("provider_configured", { provider_type: String(provider.type || provider.id || "custom").slice(0, 40) });
       return sendJson(res, 200, { provider: { ...provider, apiKey: maskKey(provider.apiKey) } });
     }
     if (req.method === "POST" && pathname === "/api/collaboration-policy") {
@@ -3179,6 +3216,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       migrateRetiredDeepSeekModels(db);
       migrateRetiredKimiModels(db);
       writeDb(db);
+      recordMetric("agent_saved", { enabled: agent.enabled !== false, tool_count: Array.isArray(agent.tools) ? agent.tools.length : 0 });
       return sendJson(res, 200, { agent: db.agents.find((item) => item.id === agent.id) });
     }
     const deleteAgentMatch = pathname.match(/^\/api\/agents\/([A-Za-z0-9_-]{1,80})$/);
@@ -3211,6 +3249,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       if (body.status === "published" && !preflight.ok) return sendJson(res, 409, { error: "Skill preflight failed.", preflight });
       const skill = upsertById(db.workflows, body);
       writeDb(db);
+      recordMetric("skill_saved", { status: String(skill.status || "draft").slice(0, 30) });
       return sendJson(res, 200, { skill });
     }
     const deleteSkillMatch = pathname.match(/^\/api\/skills\/([A-Za-z0-9_-]{1,80})$/);
@@ -3225,12 +3264,20 @@ async function handleApiInWorkspace(req, res, pathname) {
       const db = readDb();
       const workflow = upsertById(db.workflows, normalizeSkill(body));
       writeDb(db);
+      recordMetric("skill_saved", { status: String(workflow.status || "draft").slice(0, 30) });
       return sendJson(res, 200, { workflow });
     }
     if (req.method === "POST" && pathname === "/api/run") {
       const body = await readBody(req);
-      const run = await runWorkflow(body);
-      return sendJson(res, 200, run);
+      recordMetric("run_started", { source: "studio" });
+      try {
+        const run = await runWorkflow(body);
+        recordMetric("run_completed", { status: String(run.status || "completed").slice(0, 30) });
+        return sendJson(res, 200, run);
+      } catch (error) {
+        recordMetric("run_failed", { code: String(error.code || "RUN_FAILED").slice(0, 50) });
+        throw error;
+      }
     }
 
     if (req.method === "POST" && pathname === "/api/lark-bots") {
@@ -3257,6 +3304,7 @@ async function handleApiInWorkspace(req, res, pathname) {
       else db.settings.larkBots.push(bot);
       syncAgentProfiles(db, TOOL_CATALOG);
       writeDb(db);
+      recordMetric("connector_saved", { connector_type: "feishu", enabled: bot.enabled !== false });
       return sendJson(res, 200, { bot: publicDb(db).settings.larkBots.find((item) => item.id === bot.id), settings: publicDb(db).settings });
     }
     if (req.method === "POST" && pathname === "/api/lark-bot-test") {
@@ -3349,8 +3397,16 @@ ensureStore();
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  if (req.method === "GET" && (url.pathname === "/gateway/health" || url.pathname === "/api/health")) {
+  if (req.method === "GET" && url.pathname === "/api/live") {
     return sendJson(res, 200, { ok: true, service: "tona-agent-studio" });
+  }
+  if (req.method === "GET" && (url.pathname === "/gateway/health" || url.pathname === "/api/health" || url.pathname === "/api/ready")) {
+    const checks = {
+      dataDirectoryWritable: probeWritableDirectory(DATA_DIR),
+      secretsConfigured: process.env.NODE_ENV !== "production" || String(process.env.TONA_SECRETS_KEY || "").length >= 24
+    };
+    const ok = Object.values(checks).every(Boolean);
+    return sendJson(res, ok ? 200 : 503, { ok, service: "tona-agent-studio", checks });
   }
   const oauthCallback = url.pathname.match(/^\/feishu\/oauth\/callback\/([A-Za-z0-9_-]{3,80})$/);
   if (req.method === "GET" && oauthCallback) return handleFeishuOauthCallback(req, res, oauthCallback[1]);

@@ -244,7 +244,17 @@ function openReminders() {
 
 async function refresh(page = state.page) { await loadCore(); navigate(page); }
 init();
-function showAuthForm(register) { $('#loginForm').classList.toggle('hidden', register); $('#registerForm').classList.toggle('hidden', !register); }
+let registrationConfig = { mode: 'closed', canRegister: false, inviteRequired: false };
+async function loadRegistrationConfig() {
+  try { registrationConfig = await api('/api/registration-config'); } catch {}
+  $('#showRegister').classList.toggle('hidden', !registrationConfig.canRegister);
+  $('#inviteCodeField').classList.toggle('hidden', !registrationConfig.inviteRequired);
+}
+function showAuthForm(register) {
+  if (register && !registrationConfig.canRegister) return toast('Registration is currently closed.');
+  $('#loginForm').classList.toggle('hidden', register); $('#registerForm').classList.toggle('hidden', !register);
+}
+loadRegistrationConfig();
 $('#showRegister').addEventListener('click', () => showAuthForm(true));
 $('#showLogin').addEventListener('click', () => showAuthForm(false));
 $('#registerForm').addEventListener('submit', async event => { event.preventDefault(); const button = event.currentTarget.querySelector('button'); button.disabled = true; button.textContent = 'Creating...'; try { await api('/api/register', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) }); location.replace(APP_BASE + '/hub.html'); } catch (error) { toast(error.message); } finally { button.disabled = false; button.innerHTML = 'Create and enter <span>?</span>'; } });

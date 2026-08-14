@@ -109,6 +109,19 @@ button.danger:hover {
   gap: 8px;
 }
 
+.nav-section {
+  margin: 12px 10px 0;
+  color: #718096;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nav-section:first-child {
+  margin-top: 0;
+}
+
 .nav-item {
   text-align: left;
   color: #dce5ed;
@@ -474,6 +487,10 @@ textarea {
     padding: 0 8px;
   }
 
+  .nav-section {
+    display: none;
+  }
+
   .sidebar-footer {
     display: none;
   }
@@ -612,6 +629,43 @@ textarea {
   border-radius: 8px;
   background: #edf7f4;
   color: #244a42;
+}
+.activation-progress {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 0 0 18px;
+  border: 1px solid #d8dee6;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.activation-progress > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.activation-progress span {
+  color: #66717d;
+  font-size: 13px;
+}
+
+.activation-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.activation-steps span {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #eef1f4;
+}
+
+.activation-steps span.done {
+  color: #176c55;
+  background: #dff4ec;
 }
 
 .quick-grid {

@@ -5,6 +5,7 @@ const state = {
   selectedWorkflowId: null,
   selectedLarkBotId: null,
   modelUsage: null,
+  productMetrics: null,
   runtime: null,
   assistantTasks: [],
   currentAgentTab: "overview",
@@ -15,16 +16,7 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options
-  });
-  const payload = await response.json();
-  if (response.status === 401) { window.location.href = "/teamflow/"; throw new Error("Sign in required."); }
-  if (!response.ok || payload.error) throw new Error(payload.error || "Request failed.");
-  return payload;
-}
+const api = (path, options = {}) => window.TonaCore.api(path, options);
 
 function toast(message) {
   const element = $("#toast");
@@ -72,15 +64,30 @@ function renderNextAction() {
   const workflow = currentWorkflow();
   box.innerHTML = `<strong>可以运行了：</strong><span>当前有 ${enabledProviders.length} 个可用模型。选择“${escapeHtml(workflow?.name || "Skill")}”，粘贴材料后点击右上角“开始运行”。</span>`;
 }
+function renderActivationProgress() {
+  const box = document.querySelector("#activationProgress");
+  const activation = state.productMetrics?.activation;
+  if (!box || !activation) return;
+  const steps = [
+    ["configuredProvider", "配置模型"],
+    ["createdAgent", "创建 Agent"],
+    ["createdSkill", "保存 Skill"],
+    ["connectedChannel", "连接渠道"],
+    ["completedRun", "完成首次运行"]
+  ];
+  box.innerHTML = `<div><strong>激活进度 ${activation.score}/5</strong><span>完成关键设置后即可稳定运行真实任务。</span></div><div class="activation-steps">${steps.map(([key, label]) => `<span class="${activation[key] ? "done" : ""}">${activation[key] ? "✓" : "○"} ${label}</span>`).join("")}</div>`;
+}
+
 function currentWorkflow() {
   return state.db.workflows.find((workflow) => workflow.id === $("#workflowSelect").value) || state.db.workflows[0];
 }
 
 async function loadState() {
-  const [db, modelUsage, runtime] = await Promise.all([api("/api/state"), api("/api/model-usage"), api("/api/runtime")]);
+  const [db, modelUsage, runtime, metrics] = await Promise.all([api("/api/state"), api("/api/model-usage"), api("/api/runtime"), api("/api/product-metrics")]);
   state.db = db;
   state.modelUsage = modelUsage;
   state.runtime = runtime;
+  state.productMetrics = metrics;
   state.selectedProviderId ||= state.db.providers[0]?.id;
   state.selectedAgentId ||= state.db.agents[0]?.id;
   state.selectedWorkflowId ||= state.db.workflows[0]?.id;
@@ -90,6 +97,7 @@ async function loadState() {
 
 function renderAll() {
   renderNextAction();
+  renderActivationProgress();
   renderWorkflowSelect();
   renderStudioSteps();
   renderProviders();
@@ -980,6 +988,7 @@ async function oauthAgentChannel() {
     window.location.assign(result.authorizationUrl);
   } catch (error) { toast(error.message); }
 }
+function taskTypeLabel(type){return ({paovrd:'智能任务',scheduled_reminder:'定时提醒',calendar_request:'日历请求',subagent:'子任务'})[type]||'任务';}
 function taskIsActive(task){return !['completed','sent','cancelled','rejected','resume_failed'].includes(task.status);}
 async function loadAssistantTasks(){try{const result=await api('/api/assistant-tasks');state.assistantTasks=result.tasks||[];renderAssistantTasks();if(currentAgent())renderAgentUsage(currentAgent());}catch(error){const box=document.querySelector('#assistantTaskList');if(box)box.innerHTML='<p class="meta">'+escapeHtml(error.message)+'</p>';}}
 function renderAssistantTasks(){
@@ -991,7 +1000,7 @@ function renderAssistantTasks(){
     const canPause=task.type==='scheduled_reminder'&&task.status==='scheduled',canResume=task.type==='scheduled_reminder'&&task.status==='paused',canContinue=task.type==='paovrd'&&['completed_with_limits','failed'].includes(task.status),canCancel=taskIsActive(task)&&!canContinue;
     const metrics=task.metrics||{}; const metricText=[metrics.steps!=null?'步骤 '+metrics.steps:'',metrics.toolCalls!=null?'工具 '+metrics.toolCalls:'',metrics.modelCalls!=null?'模型 '+metrics.modelCalls:'',metrics.subagents!=null?'子使者 '+metrics.subagents:''].filter(Boolean).join(' · ');
     const output=task.output?.summary||task.error||''; const checkpoint=task.checkpoint; const checkpointText=checkpoint&&checkpoint.status!=='completed'?'停在 '+checkpoint.stoppedAt+' · 已完成 '+(checkpoint.completed||[]).length+' 项 · 剩余 '+(checkpoint.remaining||[]).length+' 项。'+(checkpoint.resume||''):'';
-    const card='<article class="task-card task-depth-'+Math.min(depth,2)+'"><div><h3>'+escapeHtml(task.title||task.goal||task.intent||task.type)+'</h3><p>'+escapeHtml(task.type)+' · '+escapeHtml(task.status)+(task.runAt?' · '+escapeHtml(new Date(task.runAt).toLocaleString('zh-CN')):'')+'</p><div class="pill-row"><span class="pill">'+escapeHtml(task.agentId||'未指定 Agent')+'</span>'+(task.parentAgentId?'<span class="pill">由 '+escapeHtml(task.parentAgentId)+' 委派</span>':'')+(task.phase?'<span class="pill">'+escapeHtml(task.phase)+'</span>':'')+'</div>'+(metricText?'<p class="meta">'+escapeHtml(metricText)+'</p>':'')+(output?'<p class="meta">'+escapeHtml(output.slice(0,300))+'</p>':'')+(checkpointText?'<p class="meta">'+escapeHtml(checkpointText)+'</p>':'')+'</div><div class="button-row">'+(canPause?'<button data-task-action="pause" data-task-id="'+escapeHtml(task.id)+'">暂停</button>':'')+(canResume?'<button data-task-action="resume" data-task-id="'+escapeHtml(task.id)+'">恢复</button>':'')+(canContinue?'<button data-task-action="continue" data-task-id="'+escapeHtml(task.id)+'">继续执行</button>':'')+(canCancel?'<button class="danger" data-task-action="cancel" data-task-id="'+escapeHtml(task.id)+'">取消</button>':'')+'</div></article>';
+    const card='<article class="task-card task-depth-'+Math.min(depth,2)+'"><div><h3>'+escapeHtml(task.title||task.goal||task.intent||taskTypeLabel(task.type))+'</h3><p>'+escapeHtml(taskTypeLabel(task.type))+' · '+escapeHtml(task.status)+(task.runAt?' · '+escapeHtml(new Date(task.runAt).toLocaleString('zh-CN')):'')+'</p><div class="pill-row"><span class="pill">'+escapeHtml(task.agentId||'未指定 Agent')+'</span>'+(task.parentAgentId?'<span class="pill">由 '+escapeHtml(task.parentAgentId)+' 委派</span>':'')+(task.phase?'<span class="pill">'+escapeHtml(task.phase)+'</span>':'')+'</div>'+(metricText?'<p class="meta">'+escapeHtml(metricText)+'</p>':'')+(output?'<p class="meta">'+escapeHtml(output.slice(0,300))+'</p>':'')+(checkpointText?'<p class="meta">'+escapeHtml(checkpointText)+'</p>':'')+'</div><div class="button-row">'+(canPause?'<button data-task-action="pause" data-task-id="'+escapeHtml(task.id)+'">暂停</button>':'')+(canResume?'<button data-task-action="resume" data-task-id="'+escapeHtml(task.id)+'">恢复</button>':'')+(canContinue?'<button data-task-action="continue" data-task-id="'+escapeHtml(task.id)+'">继续执行</button>':'')+(canCancel?'<button class="danger" data-task-action="cancel" data-task-id="'+escapeHtml(task.id)+'">取消</button>':'')+'</div></article>';
     return card+(byParent.get(task.id)||[]).map((child)=>renderTask(child,depth+1)).join('');
   };
   const roots=visible.filter((task)=>!task.parentTaskId||!visible.some((item)=>item.id===task.parentTaskId));

@@ -16,17 +16,20 @@
             <p>Agent Studio</p>
           </div>
         </div>
-        <nav class="nav">
-          <button class="nav-item active" data-view="quickstart">问剑台</button>
-          <button class="nav-item" data-view="studio">布阵台</button>
-          <button class="nav-item" data-view="providers">内功堂</button>
-          <button class="nav-item" data-view="agents">群侠谱</button>
-          <button class="nav-item" data-view="workflows">武学阁</button>
-          <button class="nav-item" data-view="runtime">神兵坊</button>
-          <button class="nav-item" data-view="files">藏经阁</button>
-          <button class="nav-item" data-view="lark">飞鸽驿</button>
-          <button class="nav-item" data-view="tasks">江湖令</button>
-          <button class="nav-item" data-view="runs">行迹录</button>
+        <nav class="nav" aria-label="主导航">
+          <p class="nav-section">开始</p>
+          <button class="nav-item active" data-view="quickstart">概览</button>
+          <button class="nav-item" data-view="studio">运行工作台</button>
+          <p class="nav-section">构建</p>
+          <button class="nav-item" data-view="agents">Agents</button>
+          <button class="nav-item" data-view="workflows">Skills</button>
+          <button class="nav-item" data-view="providers">模型</button>
+          <button class="nav-item" data-view="runtime">工具与连接</button>
+          <button class="nav-item" data-view="files">文件与知识</button>
+          <p class="nav-section">连接与记录</p>
+          <button class="nav-item" data-view="lark">飞书</button>
+          <button class="nav-item" data-view="tasks">任务</button>
+          <button class="nav-item" data-view="runs">运行记录</button>
         </nav>
         <div class="sidebar-footer">
           <span class="status-dot"></span>
@@ -40,13 +43,14 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">One-Click Setup</p>
-              <h2>问剑台 · 快速开局</h2>
+              <h2>概览 · 快速开始</h2>
               <p class="page-subtitle">把模型 Key、飞书机器人、今天要跑的任务放到一个地方。你不用在多个页面之间来回找。</p>
             </div>
             <button class="primary" id="quickRunButton">保存并运行</button>
           </div>
 
           <section class="setup-status" id="setupStatusBox"></section>
+          <section class="activation-progress" id="activationProgress" aria-live="polite"></section>
 
           <div class="quick-grid">
             <section class="panel">
@@ -89,14 +93,14 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Workspace</p>
-              <h2>布阵台 · 多 Agent 工作流</h2>
-              <p class="page-subtitle">第一次用，按 1-2-3 来：先去“内功堂”填 Key，再去“群侠谱”确认每个 Agent 使用的模型，最后回这里粘贴材料运行。</p>
+              <h2>运行工作台 · 多 Agent 协作</h2>
+              <p class="page-subtitle">第一次用，按 1-2-3 来：先在“模型”中填写 Key，再到“Agents”确认每个 Agent 使用的模型，最后回这里粘贴材料运行。</p>
             </div>
             <button class="primary" id="runWorkflowButton">开始运行</button>
           </div>
 
           <section class="guide-strip" id="quickGuide">
-            <button class="guide-step" data-jump="providers"><span>1</span><div><strong>先修内功</strong><p>点这里去内功堂，选择 OpenAI / DeepSeek / Kimi / 豆包，填 API Key 并启用。</p></div></button>
+            <button class="guide-step" data-jump="providers"><span>1</span><div><strong>先修内功</strong><p>点这里去模型设置，选择 OpenAI / DeepSeek / Kimi / 豆包，填 API Key 并启用。</p></div></button>
             <button class="guide-step" data-jump="agents"><span>2</span><div><strong>再选同行侠客</strong><p>每个 Agent 可以使用不同模型，比如 Researcher 用 Kimi，Critic 用 DeepSeek。</p></div></button>
             <button class="guide-step" data-jump="studio"><span>3</span><div><strong>最后布阵运行</strong><p>粘贴一段材料，选择 Skill，点“开始运行”，结果会分步骤显示。</p></div></button>
           </section>
@@ -142,7 +146,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Model Registry</p>
-              <h2>内功堂 · 模型供应商</h2>
+              <h2>模型 · 供应商</h2>
               <p class="page-subtitle">这里放你的各种大模型 key。先点左边卡片，再在右边填 key、启用、保存、测试。</p>
             </div>
             <button class="primary" id="newProviderButton">新增模型</button>
@@ -188,7 +192,7 @@
 
         <section class="view" id="view-agents">
           <div class="topbar">
-            <div><p class="eyebrow">Agent Team</p><h2>群侠谱 · Agent 队伍</h2><p class="page-subtitle">每个 Agent 都是一个独立运行单元：身份、Skill、工具、记忆、运行策略和飞书渠道在这里统一装配。</p></div>
+            <div><p class="eyebrow">Agent Team</p><h2>Agents</h2><p class="page-subtitle">每个 Agent 都是一个独立运行单元：身份、Skill、工具、记忆、运行策略和飞书渠道在这里统一装配。</p></div>
             <button class="primary" id="newAgentButton">新增 Agent</button>
           </div>
           <div class="agent-studio-layout">
@@ -272,7 +276,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Capability Registry</p>
-              <h2>武学阁 · Skill 中心</h2>
+              <h2>Skills</h2>
               <p class="page-subtitle">把可重复调用的专业能力集中管理。每个 Skill 包含触发场景、输入类型和多角色执行步骤。</p>
             </div>
             <button id="createSkillDraftButton">AI &#29983;&#25104; Skill</button>
@@ -321,8 +325,8 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Agent Runtime</p>
-              <h2>神兵坊 · 工具与联网能力</h2>
-              <p class="page-subtitle">神兵坊管理工作区可安装能力；每个 Agent 在“群侠谱”中获得独立工具授权，Runtime 负责强制校验、确认、执行和回执。</p>
+              <h2>工具与连接</h2>
+              <p class="page-subtitle">这里管理工作区可安装能力；每个 Agent 在“Agents”中获得独立工具授权，Runtime 负责强制校验、确认、执行和回执。</p>
             </div>
             <button class="primary" id="saveRuntimeButton" type="button">保存工具配置</button>
           </div>
@@ -360,7 +364,7 @@
 
         <section class="view" id="view-files">
           <div class="topbar">
-            <div><p class="eyebrow">Workspace Files</p><h2>藏经阁 · 文件与知识</h2><p class="page-subtitle">文件按当前工作区隔离，读取校验 SHA-256；产物记录 file_id、artifact_id 和版本。</p></div>
+            <div><p class="eyebrow">Workspace Files</p><h2>文件与知识</h2><p class="page-subtitle">文件按当前工作区隔离，读取校验 SHA-256；产物记录 file_id、artifact_id 和版本。</p></div>
             <button id="refreshFilesButton" type="button">刷新</button>
           </div>
           <div class="runtime-layout">
@@ -373,7 +377,7 @@
               <p class="meta">可直接提取 TXT、Markdown、HTML、JSON、CSV。Office、PDF 与图片会安全保存，解析器接入前不会伪造读取结果。</p>
             </section>
             <section class="panel">
-              <div class="panel-heading"><h3>生成产物</h3><span class="pill enabled">Runtime v2</span></div>
+              <div class="panel-heading"><h3>生成产物</h3><span class="pill enabled">受控生成</span></div>
               <form id="artifactGenerateForm" class="form-grid">
                 <label>文件名<input name="name" value="tona-output.md" required /></label>
                 <label>格式<select name="format"><option value="markdown">Markdown</option><option value="txt">TXT</option><option value="html">HTML</option><option value="json">JSON</option><option value="csv">CSV</option></select></label>
@@ -393,7 +397,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Feishu Connector</p>
-              <h2>飞鸽驿 · 飞书渠道</h2>
+              <h2>飞书连接</h2>
               <p class="page-subtitle">飞书有两种接法：群自定义机器人 Webhook 用来快速推送结果；开放平台应用机器人支持群里 @ 问答、按 App ID 路由到不同 TONA 角色。</p>
             </div>
             <button id="testLarkButton">测试发送</button>
@@ -465,7 +469,7 @@
         </section>
 
         <section class="view" id="view-tasks">
-          <div class="topbar"><div><p class="eyebrow">Task Center</p><h2>江湖令 · 任务中心</h2><p class="page-subtitle">统一查看 PAOVRD、定时提醒和日历请求；可暂停提醒或取消尚未完成的任务。</p></div><button id="refreshTasksButton">刷新</button></div>
+          <div class="topbar"><div><p class="eyebrow">Task Center</p><h2>任务中心</h2><p class="page-subtitle">统一查看智能任务、定时提醒和日历请求；可暂停提醒或取消尚未完成的任务。</p></div><button id="refreshTasksButton">刷新</button></div>
           <section class="panel"><div class="task-filters"><button class="task-filter active" data-task-filter="active">进行中</button><button class="task-filter" data-task-filter="all">全部</button></div><div id="assistantTaskList" class="task-list"><p class="meta">正在加载任务…</p></div></section>
         </section>
 
@@ -473,7 +477,7 @@
           <div class="topbar">
             <div>
               <p class="eyebrow">Run Logger</p>
-              <h2>行迹录 · 运行记录</h2>
+              <h2>运行记录</h2>
               <p class="page-subtitle">这里看每次 Skill 的执行结果、模型使用情况和错误提示。</p>
             </div>
             <div class="button-row"><button id="runCollaborationPilotButton" class="primary">运行协作实验</button><button id="refreshRunsButton">刷新</button></div>
@@ -491,6 +495,7 @@
     </div>
 
     <div id="toast" class="toast"></div>
+    <script src="/core.js"></script>
     <script src="/app.js"></script>
     <script src="/files.js"></script>
   </body>
